@@ -10,10 +10,11 @@
 #include <string.h>
 #include <dirent.h>
 
-PSP_MODULE_INFO("PSPBox", 0, 1, 4);
+PSP_MODULE_INFO("PSPBox", 0, 1, 5);
 PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER);
 
 #define WAVEFORM_WIDTH 40
+#define AUDIO_BUFFER_SIZE 2048
 
 typedef struct {
     char name[64];
@@ -22,20 +23,24 @@ typedef struct {
 
 typedef struct {
     char title[64];
+    char full_path[256];
     float pitch;
     int is_playing;
     float progress;
     char waveform[WAVEFORM_WIDTH + 1];
+    int file_handle;
+    int audio_active;
 } DeckState;
 
-DeckState deckA = {"Nessun brano", 0.0f, 0, 0.0f, "----------------------------------------"};
+DeckState deckA = {"Nessun brano", "", 0.0f, 0, 0.0f, "----------------------------------------", -1, 0};
 
 int browser_open = 0;
 char current_path[256] = "ms0:/MUSIC";
-FileItem file_list[20];
+FileItem file_list[30];
 int file_count = 0;
 int selected_index = 0;
 int audio_channel = -1;
+short audio_buffer[AUDIO_BUFFER_SIZE * 2];
 
 int exit_callback(int arg1, int arg2, void *common) {
     sceKernelExitGame();
@@ -54,6 +59,25 @@ void SetupCallbacks() {
     if (thid >= 0) sceKernelStartThread(thid, 0, 0);
 }
 
+// Schermata di avvio PSPBox
+void ShowSplashScreen() {
+    pspDebugScreenInit();
+    for (int i = 0; i < 90; i++) {
+        pspDebugScreenSetXY(0, 0);
+        pspDebugScreenPrintf("\n\n\n");
+        pspDebugScreenPrintf("  ==================================================\n");
+        pspDebugScreenPrintf("  |                                                |\n");
+        pspDebugScreenPrintf("  |               PSPBox DJ Engine                 |\n");
+        pspDebugScreenPrintf("  |               v1.5 Professional                |\n");
+        pspDebugScreenPrintf("  |                                                |\n");
+        pspDebugScreenPrintf("  ==================================================\n\n");
+        pspDebugScreenPrintf("             Inizializzazione Hardware Audio...\n");
+        if (i > 30) pspDebugScreenPrintf("             Caricamento Sistema File (ms0:/)...\n");
+        if (i > 60) pspDebugScreenPrintf("             Pronto per il DJing!\n");
+        sceDisplayWaitVblankStart();
+    }
+}
+
 void GenerateQuickWaveform(const char* filename) {
     int seed = 0;
     for (int i = 0; filename[i] != '\0'; i++) seed += filename[i];
@@ -69,7 +93,6 @@ void GenerateQuickWaveform(const char* filename) {
 void ScanPath(const char* path) {
     file_count = 0;
     
-    // Aggiungiamo la voce ".." per tornare indietro se non siamo alla radice
     if (strcmp(path, "ms0:") != 0 && strcmp(path, "ms0:/") != 0 && strcmp(path, "ms0:/MUSIC") != 0) {
         snprintf(file_list[0].name, 64, "..");
         file_list[0].is_dir = 1;
@@ -79,12 +102,11 @@ void ScanPath(const char* path) {
     DIR *dir = opendir(path);
     if (dir) {
         struct dirent *ent;
-        while ((ent = readdir(dir)) != NULL && file_count < 20) {
+        while ((ent = readdir(dir)) != NULL && file_count < 30) {
             if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
             
             snprintf(file_list[file_count].name, 64, "%s", ent->d_name);
             
-            // Verifica tipo file/cartella usando sceIoGetstat
             char full_item_path[300];
             snprintf(full_item_path, sizeof(full_item_path), "%s/%s", path, ent->d_name);
             
@@ -102,19 +124,50 @@ void ScanPath(const char* path) {
     }
     
     if (file_count == 0) {
-        snprintf(file_list[0].name, 64, "Nessun file trovato");
+        snprintf(file_list[0].name, 64, "Nessun file presente");
         file_list[0].is_dir = 0;
         file_count = 1;
     }
     selected_index = 0;
 }
 
+// Apri file WAV per lo streaming audio
+void LoadAudioTrack(const char* fullpath) {
+    if (deckA.file_handle >= 0) {
+        sceIoClose(deckA.file_handle);
+        deckA.file_handle = -1;
+    }
+
+    deckA.file_handle = sceIoOpen(fullpath, PSP_O_RDONLY, 0777);
+    if (deckA.file_handle >= 0) {
+        // Salta l'intestazione WAV (44 byte) per arrivare ai dati PCM
+        sceIoLseek(deckA.file_handle, 44, PSP_SEEK_SET);
+        deckA.audio_active = 1;
+    } else {
+        deckA.audio_active = 0;
+    }
+}
+
+// Processo di streaming audio in riproduzione
+void ProcessAudioStream() {
+    if (deckA.is_playing && deckA.audio_active && deckA.file_handle >= 0) {
+        int bytes_read = sceIoRead(deckA.file_handle, audio_buffer, sizeof(audio_buffer));
+        if (bytes_read > 0) {
+            sceAudioOutputPannedBlocking(audio_channel, PSP_AUDIO_VOLUME_MAX, PSP_AUDIO_VOLUME_MAX, audio_buffer);
+        } else {
+            // Fine file: ricomincia da capo (Loop)
+            sceIoLseek(deckA.file_handle, 44, PSP_SEEK_SET);
+            deckA.progress = 0.0f;
+        }
+    }
+}
+
 int main() {
-    pspDebugScreenInit();
     SetupCallbacks();
+    ShowSplashScreen();
 
     pspAudioInit();
-    audio_channel = sceAudioChReserve(PSP_AUDIO_NEXT_CHANNEL, 2048, PSP_AUDIO_FORMAT_STEREO);
+    audio_channel = sceAudioChReserve(PSP_AUDIO_NEXT_CHANNEL, AUDIO_BUFFER_SIZE, PSP_AUDIO_FORMAT_STEREO);
 
     ScanPath(current_path);
 
@@ -154,8 +207,13 @@ int main() {
                     ScanPath(current_path);
                 } else {
                     snprintf(deckA.title, 64, "%s", file_list[selected_index].name);
+                    snprintf(deckA.full_path, 256, "%s/%s", current_path, deckA.title);
+                    
                     GenerateQuickWaveform(deckA.title);
+                    LoadAudioTrack(deckA.full_path);
+                    
                     deckA.progress = 0.0f;
+                    deckA.is_playing = 1; // Play automatico al caricamento
                     browser_open = 0;
                 }
             }
@@ -177,35 +235,46 @@ int main() {
         }
 
         if (deckA.is_playing) {
-            deckA.progress += 0.2f;
+            deckA.progress += 0.15f;
             if (deckA.progress > 100.0f) deckA.progress = 0.0f;
+            ProcessAudioStream();
         }
 
         last_buttons = pad.Buttons;
 
+        // --- RENDER INTERFACCIA PROFESSIONALE ---
         pspDebugScreenSetXY(0, 0);
-        pspDebugScreenPrintf("+------------------------------------------------+\n");
-        pspDebugScreenPrintf("|            PSPBox DJ Engine v1.4               |\n");
-        pspDebugScreenPrintf("+------------------------------------------------+\n\n");
-
+        
         if (browser_open) {
-            pspDebugScreenPrintf(" BROWSER: %s\n", current_path);
-            pspDebugScreenPrintf("--------------------------------------------------\n");
+            // INTERFACCIA MODALITÀ BROWSER
+            pspDebugScreenPrintf("==================================================\n");
+            pspDebugScreenPrintf("  PSPBox DJ - FILE BROWSER                        \n");
+            pspDebugScreenPrintf("  PATH: %s\n", current_path);
+            pspDebugScreenPrintf("==================================================\n\n");
+
             for (int i = 0; i < file_count; i++) {
                 if (i == selected_index) {
-                    pspDebugScreenPrintf(" > %s %s <\n", file_list[i].is_dir ? "[DIR]" : "[TRK]", file_list[i].name);
+                    pspDebugScreenPrintf(" > %-7s %s <\n", file_list[i].is_dir ? "[DIR]" : "[AUDIO]", file_list[i].name);
                 } else {
-                    pspDebugScreenPrintf("   %s %s  \n", file_list[i].is_dir ? "[DIR]" : "[TRK]", file_list[i].name);
+                    pspDebugScreenPrintf("   %-7s %s  \n", file_list[i].is_dir ? "[DIR]" : "[AUDIO]", file_list[i].name);
                 }
             }
-            pspDebugScreenPrintf("--------------------------------------------------\n");
-            pspDebugScreenPrintf(" [X] Entra / Seleziona  |  [Triangolo] Chiudi\n");
+            
+            pspDebugScreenPrintf("\n--------------------------------------------------\n");
+            pspDebugScreenPrintf(" [D-PAD]: Scorri  |  [X]: Apri/Carica  |  [TRIANGOLO]: Chiudi\n");
         } else {
-            pspDebugScreenPrintf(" DECK A: %s\n", deckA.title);
-            pspDebugScreenPrintf(" STATUS: %s  |  PITCH: %+.1f%%\n\n", 
-                                 deckA.is_playing ? ">> PLAY" : "|| PAUSE", deckA.pitch);
+            // INTERFACCIA MODALITÀ PLAY / DECK
+            pspDebugScreenPrintf("==================================================\n");
+            pspDebugScreenPrintf("  PSPBox DJ Engine v1.5  |  DECK A               \n");
+            pspDebugScreenPrintf("==================================================\n\n");
 
-            pspDebugScreenPrintf(" --- WAVEFORM DISPLAY ---\n ");
+            pspDebugScreenPrintf(" TRACCIA : %s\n", deckA.title);
+            pspDebugScreenPrintf(" STATO   : [%s]  |  AUDIO HW: [%s]\n", 
+                                 deckA.is_playing ? " PLAYING " : " PAUSED  ",
+                                 deckA.audio_active ? "STREAM WAV" : "SIMULATO ");
+            pspDebugScreenPrintf(" PITCH   : %+.1f%%  (L/R:Fine, Shift+L/R:Coarse)\n\n", deckA.pitch);
+
+            pspDebugScreenPrintf(" --- WAVEFORM dinamica ---\n ");
             pspDebugScreenPrintf("%s\n ", deckA.waveform);
             
             int pos = (int)((deckA.progress / 100.0f) * WAVEFORM_WIDTH);
@@ -216,12 +285,13 @@ int main() {
             pspDebugScreenPrintf("  [%.0f%%]\n\n", deckA.progress);
 
             pspDebugScreenPrintf("--------------------------------------------------\n");
-            pspDebugScreenPrintf(" [Triangolo] Browser | [X] Play/Pause | [L/R] Pitch\n");
+            pspDebugScreenPrintf(" [TRIANGOLO]: Browser | [X]: Play/Pause | [L/R]: Pitch\n");
         }
 
         sceDisplayWaitVblankStart();
     }
 
+    if (deckA.file_handle >= 0) sceIoClose(deckA.file_handle);
     if (audio_channel >= 0) sceAudioChRelease(audio_channel);
     pspAudioEnd();
 
