@@ -1,0 +1,17 @@
+name: Build PSP EBOOT
+
+on: [push]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: pspdev/pspdev:latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Build Game
+        run: make
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: PSPBox-EBOOT
+          path: EBOOT.PBP
