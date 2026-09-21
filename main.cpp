@@ -9,23 +9,29 @@
 #include <string.h>
 #include <dirent.h>
 
-PSP_MODULE_INFO("PSPBox", 0, 1, 3);
+PSP_MODULE_INFO("PSPBox", 0, 1, 4);
 PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER);
 
-#define WAVEFORM_WIDTH 30
+#define WAVEFORM_WIDTH 40
+
+typedef struct {
+    char name[64];
+    int is_dir;
+} FileItem;
 
 typedef struct {
     char title[64];
     float pitch;
     int is_playing;
     float progress;
-    char waveform[WAVEFORM_WIDTH + 1]; // Buffer per la waveform rapida
+    char waveform[WAVEFORM_WIDTH + 1];
 } DeckState;
 
-DeckState deckA = {"Nessun brano", 0.0f, 0, 0.0f, "------------------------------"};
+DeckState deckA = {"Nessun brano", 0.0f, 0, 0.0f, "----------------------------------------"};
 
 int browser_open = 0;
-char file_list[10][64];
+char current_path[256] = "ms0:/MUSIC";
+FileItem file_list[20];
 int file_count = 0;
 int selected_index = 0;
 int audio_channel = -1;
@@ -47,7 +53,6 @@ void SetupCallbacks() {
     if (thid >= 0) sceKernelStartThread(thid, 0, 0);
 }
 
-// Generatore rapido di Waveform (analizza il nome o il file al volo)
 void GenerateQuickWaveform(const char* filename) {
     int seed = 0;
     for (int i = 0; filename[i] != '\0'; i++) seed += filename[i];
@@ -60,35 +65,43 @@ void GenerateQuickWaveform(const char* filename) {
     deckA.waveform[WAVEFORM_WIDTH] = '\0';
 }
 
-void ScanMusicFolder() {
+void ScanPath(const char* path) {
     file_count = 0;
-    DIR *dir = opendir("ms0:/MUSIC");
+    DIR *dir = opendir(path);
     if (dir) {
         struct dirent *ent;
-        while ((ent = readdir(dir)) != NULL && file_count < 10) {
-            if (ent->d_name[0] != '.') {
-                strncpy(file_list[file_count], ent->d_name, 63);
-                file_count++;
+        while ((ent = readdir(dir)) != NULL && file_count < 20) {
+            if (strcmp(ent->d_name, ".") == 0) continue; // Ignora cartella corrente
+            
+            snprintf(file_list[file_count].name, 64, "%s", ent->d_name);
+            
+            // Verifica se e' una cartella o un file
+            if (ent->d_stat.st_attr & FIO_SO_IFDIR) {
+                file_list[file_count].is_dir = 1;
+            } else {
+                file_list[file_count].is_dir = 0;
             }
+            file_count++;
         }
         closedir(dir);
     }
     
     if (file_count == 0) {
-        strcpy(file_list[0], "traccia_test.wav");
+        snprintf(file_list[0].name, 64, "%s", "Nessun file trovato");
+        file_list[0].is_dir = 0;
         file_count = 1;
     }
+    selected_index = 0;
 }
 
 int main() {
     pspDebugScreenInit();
     SetupCallbacks();
 
-    // Inizializzazione Hardware Audio PSP
     pspAudioInit();
     audio_channel = sceAudioChReserve(PSP_AUDIO_NEXT_CHANNEL, 2048, PSP_AUDIO_FORMAT_STEREO);
 
-    ScanMusicFolder();
+    ScanPath(current_path);
 
     SceCtrlData pad;
     unsigned int last_buttons = 0;
@@ -112,10 +125,28 @@ int main() {
                 if (selected_index > 0) selected_index--;
             }
             if (pressed & PSP_CTRL_CROSS) {
-                strncpy(deckA.title, file_list[selected_index], 63);
-                GenerateQuickWaveform(deckA.title); // Genera la waveform al volo!
-                deckA.progress = 0.0f;
-                browser_open = 0;
+                if (file_list[selected_index].is_dir) {
+                    // Se e' una cartella, entriamo dentro!
+                    if (strcmp(file_list[selected_index].name, "..") == 0) {
+                        // Torna indietro di un livello
+                        char *last_slash = strrchr(current_path, '/');
+                        if (last_slash && last_slash != current_path + 3) {
+                            *last_slash = '\0';
+                        }
+                    } else {
+                        // Entra nella sottocartella
+                        char new_path[256];
+                        snprintf(new_path, sizeof(new_path), "%s/%s", current_path, file_list[selected_index].name);
+                        snprintf(current_path, sizeof(current_path), "%s", new_path);
+                    }
+                    ScanPath(current_path);
+                } else {
+                    // Se e' un file audio, lo carichiamo sul Deck!
+                    snprintf(deckA.title, 64, "%s", file_list[selected_index].name);
+                    GenerateQuickWaveform(deckA.title);
+                    deckA.progress = 0.0f;
+                    browser_open = 0; // Chiudi browser
+                }
             }
         } else {
             int shift = (pad.Buttons & PSP_CTRL_CIRCLE) ? 1 : 0;
@@ -141,36 +172,41 @@ int main() {
 
         last_buttons = pad.Buttons;
 
+        // --- RENDER GRAFICO MEGLIORATO ---
         pspDebugScreenSetXY(0, 0);
-        pspDebugScreenPrintf("==================================================\n");
-        pspDebugScreenPrintf("  PSPBox DJ Engine v1.3 - Quick Waveform & Audio  \n");
-        pspDebugScreenPrintf("==================================================\n\n");
+        pspDebugScreenPrintf("+------------------------------------------------+\n");
+        pspDebugScreenPrintf("|            PSPBox DJ Engine v1.4               |\n");
+        pspDebugScreenPrintf("+------------------------------------------------+\n\n");
 
         if (browser_open) {
-            pspDebugScreenPrintf(" === FILE BROWSER (ms0:/MUSIC/) ===\n\n");
+            pspDebugScreenPrintf(" BROWSER: %s\n", current_path);
+            pspDebugScreenPrintf("--------------------------------------------------\n");
             for (int i = 0; i < file_count; i++) {
-                if (i == selected_index) pspDebugScreenPrintf(" > %s <\n", file_list[i]);
-                else pspDebugScreenPrintf("   %s  \n", file_list[i]);
+                if (i == selected_index) {
+                    pspDebugScreenPrintf(" > %s %s <\n", file_list[i].is_dir ? "[DIR]" : "[TRK]", file_list[i].name);
+                } else {
+                    pspDebugScreenPrintf("   %s %s  \n", file_list[i].is_dir ? "[DIR]" : "[TRK]", file_list[i].name);
+                }
             }
+            pspDebugScreenPrintf("--------------------------------------------------\n");
+            pspDebugScreenPrintf(" [X] Entra / Seleziona  |  [Triangolo] Chiudi\n");
         } else {
-            pspDebugScreenPrintf(" [ DECK A ]\n");
-            pspDebugScreenPrintf(" Traccia : %s\n", deckA.title);
-            pspDebugScreenPrintf(" Status  : [%s]   |   Pitch: %+.1f%%\n\n", 
-                                 deckA.is_playing ? "PLAYING" : "PAUSED ", deckA.pitch);
+            pspDebugScreenPrintf(" DECK A: %s\n", deckA.title);
+            pspDebugScreenPrintf(" STATUS: %s  |  PITCH: %+.1f%%\n\n", 
+                                 deckA.is_playing ? ">> PLAY" : "|| PAUSE", deckA.pitch);
 
-            pspDebugScreenPrintf(" --- RAPID WAVEFORM GENERATOR ---\n ");
-            pspDebugScreenPrintf("%s\n", deckA.waveform);
+            pspDebugScreenPrintf(" --- WAVEFORM DISPLAY ---\n ");
+            pspDebugScreenPrintf("%s\n ", deckA.waveform);
             
-            // Cursore di riproduzione sulla waveform
             int pos = (int)((deckA.progress / 100.0f) * WAVEFORM_WIDTH);
-            pspDebugScreenPrintf(" ");
             for (int i = 0; i < WAVEFORM_WIDTH; i++) {
                 if (i == pos) pspDebugScreenPrintf("^");
                 else pspDebugScreenPrintf("-");
             }
-            pspDebugScreenPrintf("  (%.0f%%)\n\n", deckA.progress);
+            pspDebugScreenPrintf("  [%.0f%%]\n\n", deckA.progress);
 
-            pspDebugScreenPrintf(" [Triangle]: Browser  |  [X]: Play/Pause  |  [L/R]: Pitch\n");
+            pspDebugScreenPrintf("--------------------------------------------------\n");
+            pspDebugScreenPrintf(" [Triangolo] Browser | [X] Play/Pause | [L/R] Pitch\n");
         }
 
         sceDisplayWaitVblankStart();
