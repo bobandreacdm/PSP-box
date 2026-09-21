@@ -4,6 +4,7 @@
 #include <pspdisplay.h>
 #include <pspaudiolib.h>
 #include <pspaudio.h>
+#include <pspiofilemgr.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -67,27 +68,41 @@ void GenerateQuickWaveform(const char* filename) {
 
 void ScanPath(const char* path) {
     file_count = 0;
+    
+    // Aggiungiamo la voce ".." per tornare indietro se non siamo alla radice
+    if (strcmp(path, "ms0:") != 0 && strcmp(path, "ms0:/") != 0 && strcmp(path, "ms0:/MUSIC") != 0) {
+        snprintf(file_list[0].name, 64, "..");
+        file_list[0].is_dir = 1;
+        file_count = 1;
+    }
+
     DIR *dir = opendir(path);
     if (dir) {
         struct dirent *ent;
         while ((ent = readdir(dir)) != NULL && file_count < 20) {
-            if (strcmp(ent->d_name, ".") == 0) continue; // Ignora cartella corrente
+            if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
             
             snprintf(file_list[file_count].name, 64, "%s", ent->d_name);
             
-            // Verifica se e' una cartella o un file
-            if (ent->d_stat.st_attr & FIO_SO_IFDIR) {
-                file_list[file_count].is_dir = 1;
+            // Verifica tipo file/cartella usando sceIoGetstat
+            char full_item_path[300];
+            snprintf(full_item_path, sizeof(full_item_path), "%s/%s", path, ent->d_name);
+            
+            SceIoStat stat;
+            memset(&stat, 0, sizeof(SceIoStat));
+            if (sceIoGetstat(full_item_path, &stat) >= 0) {
+                file_list[file_count].is_dir = FIO_SO_ISDIR(stat.st_attr) ? 1 : 0;
             } else {
                 file_list[file_count].is_dir = 0;
             }
+
             file_count++;
         }
         closedir(dir);
     }
     
     if (file_count == 0) {
-        snprintf(file_list[0].name, 64, "%s", "Nessun file trovato");
+        snprintf(file_list[0].name, 64, "Nessun file trovato");
         file_list[0].is_dir = 0;
         file_count = 1;
     }
@@ -126,26 +141,22 @@ int main() {
             }
             if (pressed & PSP_CTRL_CROSS) {
                 if (file_list[selected_index].is_dir) {
-                    // Se e' una cartella, entriamo dentro!
                     if (strcmp(file_list[selected_index].name, "..") == 0) {
-                        // Torna indietro di un livello
                         char *last_slash = strrchr(current_path, '/');
                         if (last_slash && last_slash != current_path + 3) {
                             *last_slash = '\0';
                         }
                     } else {
-                        // Entra nella sottocartella
                         char new_path[256];
                         snprintf(new_path, sizeof(new_path), "%s/%s", current_path, file_list[selected_index].name);
                         snprintf(current_path, sizeof(current_path), "%s", new_path);
                     }
                     ScanPath(current_path);
                 } else {
-                    // Se e' un file audio, lo carichiamo sul Deck!
                     snprintf(deckA.title, 64, "%s", file_list[selected_index].name);
                     GenerateQuickWaveform(deckA.title);
                     deckA.progress = 0.0f;
-                    browser_open = 0; // Chiudi browser
+                    browser_open = 0;
                 }
             }
         } else {
@@ -172,7 +183,6 @@ int main() {
 
         last_buttons = pad.Buttons;
 
-        // --- RENDER GRAFICO MEGLIORATO ---
         pspDebugScreenSetXY(0, 0);
         pspDebugScreenPrintf("+------------------------------------------------+\n");
         pspDebugScreenPrintf("|            PSPBox DJ Engine v1.4               |\n");
