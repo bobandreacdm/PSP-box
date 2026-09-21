@@ -7,7 +7,7 @@ CXXFLAGS = $(CFLAGS) -fno-exceptions -fno-rtti
 ASFLAGS = $(CFLAGS)
 
 LIBDIR =
-LIBS = -lpspdebug -lpspdisplay -lpspge -lpspctrl -lpspsdk
+LIBS = -lpspdebug -lpspdisplay -lpspge -lpspctrl -lpspsdk -lpspaudiolib -lpspaudio
 
 EXTRA_TARGETS = EBOOT.PBP
 PSP_EBOOT_TITLE = PSPBox DJ Engine
