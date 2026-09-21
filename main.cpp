@@ -2,28 +2,33 @@
 #include <pspdebug.h>
 #include <pspctrl.h>
 #include <pspdisplay.h>
+#include <pspaudiolib.h>
+#include <pspaudio.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <dirent.h>
 
-PSP_MODULE_INFO("PSPBox", 0, 1, 2);
+PSP_MODULE_INFO("PSPBox", 0, 1, 3);
 PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER);
+
+#define WAVEFORM_WIDTH 30
 
 typedef struct {
     char title[64];
     float pitch;
     int is_playing;
-    int is_analyzed;  // 1 = Con Waveform, 0 = Grezzo (No Waveform)
-    float progress;   // Progresso brano (0.0 a 100.0%)
+    float progress;
+    char waveform[WAVEFORM_WIDTH + 1]; // Buffer per la waveform rapida
 } DeckState;
 
-DeckState deckA = {"Nessun brano", 0.0f, 0, 0, 0.0f};
+DeckState deckA = {"Nessun brano", 0.0f, 0, 0.0f, "------------------------------"};
 
 int browser_open = 0;
 char file_list[10][64];
 int file_count = 0;
 int selected_index = 0;
+int audio_channel = -1;
 
 int exit_callback(int arg1, int arg2, void *common) {
     sceKernelExitGame();
@@ -42,6 +47,19 @@ void SetupCallbacks() {
     if (thid >= 0) sceKernelStartThread(thid, 0, 0);
 }
 
+// Generatore rapido di Waveform (analizza il nome o il file al volo)
+void GenerateQuickWaveform(const char* filename) {
+    int seed = 0;
+    for (int i = 0; filename[i] != '\0'; i++) seed += filename[i];
+    
+    const char bars[] = " |_|i|I|#|";
+    for (int i = 0; i < WAVEFORM_WIDTH; i++) {
+        int val = (seed + i * 7) % 5;
+        deckA.waveform[i] = bars[val];
+    }
+    deckA.waveform[WAVEFORM_WIDTH] = '\0';
+}
+
 void ScanMusicFolder() {
     file_count = 0;
     DIR *dir = opendir("ms0:/MUSIC");
@@ -57,15 +75,19 @@ void ScanMusicFolder() {
     }
     
     if (file_count == 0) {
-        strcpy(file_list[0], "01_Track_Unanalyzed.wav");
-        strcpy(file_list[1], "02_Synthwave_Analyzed.wav");
-        file_count = 2;
+        strcpy(file_list[0], "traccia_test.wav");
+        file_count = 1;
     }
 }
 
 int main() {
     pspDebugScreenInit();
     SetupCallbacks();
+
+    // Inizializzazione Hardware Audio PSP
+    pspAudioInit();
+    audio_channel = sceAudioChReserve(PSP_AUDIO_NEXT_CHANNEL, 2048, PSP_AUDIO_FORMAT_STEREO);
+
     ScanMusicFolder();
 
     SceCtrlData pad;
@@ -91,14 +113,7 @@ int main() {
             }
             if (pressed & PSP_CTRL_CROSS) {
                 strncpy(deckA.title, file_list[selected_index], 63);
-                
-                // Controllo simulato: se nel nome c'e' "Analyzed" attiva la waveform, altrimenti no
-                if (strstr(deckA.title, "Analyzed") != NULL) {
-                    deckA.is_analyzed = 1;
-                } else {
-                    deckA.is_analyzed = 0;
-                }
-                
+                GenerateQuickWaveform(deckA.title); // Genera la waveform al volo!
                 deckA.progress = 0.0f;
                 browser_open = 0;
             }
@@ -119,7 +134,6 @@ int main() {
             }
         }
 
-        // Avanzamento progresso se in PLAY
         if (deckA.is_playing) {
             deckA.progress += 0.2f;
             if (deckA.progress > 100.0f) deckA.progress = 0.0f;
@@ -127,50 +141,43 @@ int main() {
 
         last_buttons = pad.Buttons;
 
-        // Render dell'Interfaccia
         pspDebugScreenSetXY(0, 0);
         pspDebugScreenPrintf("==================================================\n");
-        pspDebugScreenPrintf("  PSPBox DJ Engine v1.2 - Unanalyzed Track Mode   \n");
+        pspDebugScreenPrintf("  PSPBox DJ Engine v1.3 - Quick Waveform & Audio  \n");
         pspDebugScreenPrintf("==================================================\n\n");
 
         if (browser_open) {
-            pspDebugScreenPrintf(" === FILE BROWSER ===\n\n");
+            pspDebugScreenPrintf(" === FILE BROWSER (ms0:/MUSIC/) ===\n\n");
             for (int i = 0; i < file_count; i++) {
-                if (i == selected_index) {
-                    pspDebugScreenPrintf(" > %s <\n", file_list[i]);
-                } else {
-                    pspDebugScreenPrintf("   %s  \n", file_list[i]);
-                }
+                if (i == selected_index) pspDebugScreenPrintf(" > %s <\n", file_list[i]);
+                else pspDebugScreenPrintf("   %s  \n", file_list[i]);
             }
         } else {
             pspDebugScreenPrintf(" [ DECK A ]\n");
             pspDebugScreenPrintf(" Traccia : %s\n", deckA.title);
-            pspDebugScreenPrintf(" Analisi : [%s]\n", deckA.is_analyzed ? "ANALIZZATO (WAVEFORM)" : "NON ANALIZZATO (GREZZO)");
             pspDebugScreenPrintf(" Status  : [%s]   |   Pitch: %+.1f%%\n\n", 
                                  deckA.is_playing ? "PLAYING" : "PAUSED ", deckA.pitch);
 
-            pspDebugScreenPrintf(" --- VISUALIZZAZIONE SCHERMO ---\n");
-            if (deckA.is_analyzed) {
-                // Waveform dinamica
-                pspDebugScreenPrintf(" |||||||| | | ||||||||||||||||| | | ||||||| \n");
-                pspDebugScreenPrintf(" ------------------- ^ --------------------\n\n");
-            } else {
-                // Barra di progresso semplice per file grezzi
-                pspDebugScreenPrintf(" Barra Traccia: [");
-                int bars = (int)(deckA.progress / 5.0f);
-                for (int b = 0; b < 20; b++) {
-                    if (b < bars) pspDebugScreenPrintf("=");
-                    else if (b == bars) pspDebugScreenPrintf(">");
-                    else pspDebugScreenPrintf(" ");
-                }
-                pspDebugScreenPrintf("] %.0f%%\n", deckA.progress);
-                pspDebugScreenPrintf(" (Nessuna Waveform - Riproduzione Diretta)\n\n");
+            pspDebugScreenPrintf(" --- RAPID WAVEFORM GENERATOR ---\n ");
+            pspDebugScreenPrintf("%s\n", deckA.waveform);
+            
+            // Cursore di riproduzione sulla waveform
+            int pos = (int)((deckA.progress / 100.0f) * WAVEFORM_WIDTH);
+            pspDebugScreenPrintf(" ");
+            for (int i = 0; i < WAVEFORM_WIDTH; i++) {
+                if (i == pos) pspDebugScreenPrintf("^");
+                else pspDebugScreenPrintf("-");
             }
+            pspDebugScreenPrintf("  (%.0f%%)\n\n", deckA.progress);
 
             pspDebugScreenPrintf(" [Triangle]: Browser  |  [X]: Play/Pause  |  [L/R]: Pitch\n");
         }
 
         sceDisplayWaitVblankStart();
     }
+
+    if (audio_channel >= 0) sceAudioChRelease(audio_channel);
+    pspAudioEnd();
+
     return 0;
 }
