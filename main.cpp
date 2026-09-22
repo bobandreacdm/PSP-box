@@ -70,7 +70,6 @@ float ReadRekordboxBPM(const char* fullpath) {
     int fd = sceIoOpen(fullpath, PSP_O_RDONLY, 0777);
     if (fd < 0) return 0.0f;
 
-    // Legge i primi 4KB per scansionare il tag ID3
     unsigned char buffer[4096];
     int read_bytes = sceIoRead(fd, buffer, sizeof(buffer));
     sceIoClose(fd);
@@ -79,14 +78,10 @@ float ReadRekordboxBPM(const char* fullpath) {
         return 0.0f;
     }
 
-    float detected_bpm = 0.0f;
-
-    // Cerca la sequenza "TBPM" nel buffer
     for (int i = 0; i < read_bytes - 15; i++) {
         if (buffer[i] == 'T' && buffer[i+1] == 'B' && buffer[i+2] == 'P' && buffer[i+3] == 'M') {
             char bpm_str[16] = {0};
             int idx = 0;
-            // Salta i 10 byte di header del frame e raccoglie solo i caratteri numerici/punto
             for (int j = i + 10; j < i + 25 && j < read_bytes; j++) {
                 char c = buffer[j];
                 if ((c >= '0' && c <= '9') || c == '.') {
@@ -95,7 +90,7 @@ float ReadRekordboxBPM(const char* fullpath) {
                 }
             }
             if (idx > 0) {
-                detected_bpm = atof(bpm_str);
+                float detected_bpm = atof(bpm_str);
                 if (detected_bpm > 30.0f && detected_bpm < 300.0f) {
                     return detected_bpm;
                 }
@@ -162,19 +157,17 @@ void ScanPath(const char* path) {
     selected_index = 0;
 }
 
-// Riempimento buffer MP3 dal file su Memory Stick
+// Riempimento buffer MP3 basato su API nativa PSP
 int FillMp3Buffer(int fd, int mp3_handle) {
-    Uchar* buf_ptr = NULL;
+    SceUchar* buf_ptr = NULL;
     SceInt32 buf_size = 0;
-    SceInt32 fetch_pos = 0;
 
     if (sceMp3CheckStreamDataNeeded(mp3_handle) > 0) {
-        sceMp3GetMp3BufState(mp3_handle, &buf_ptr, &buf_size, &fetch_pos);
+        buf_size = sceMp3GetMp3Buf(mp3_handle, &buf_ptr);
         if (buf_ptr && buf_size > 0) {
-            sceIoLseek(fd, fetch_pos, PSP_SEEK_SET);
             int read_bytes = sceIoRead(fd, buf_ptr, buf_size);
             if (read_bytes > 0) {
-                sceMp3RegisterStreamData(mp3_handle, read_bytes);
+                sceMp3NotifyAddStreamData(mp3_handle, read_bytes);
             }
         }
     }
@@ -201,7 +194,6 @@ void LoadTrack(const char* filename, const char* fullpath) {
     deckA.current_bpm = deckA.base_bpm;
     deckA.progress = 0.0f;
 
-    // Apertura file e inizializzazione Decoder MP3 Hardware PSP
     deckA.handle = sceIoOpen(fullpath, PSP_O_RDONLY, 0777);
     if (deckA.handle >= 0) {
         sceMp3InitResource();
@@ -221,7 +213,7 @@ void LoadTrack(const char* filename, const char* fullpath) {
         if (deckA.mp3_handle >= 0) {
             sceMp3Init(deckA.mp3_handle);
             FillMp3Buffer(deckA.handle, deckA.mp3_handle);
-            deckA.is_playing = 0; // Parte in pausa pronto sul CUE
+            deckA.is_playing = 0;
         } else {
             deckA.is_playing = 0;
         }
@@ -281,11 +273,9 @@ int main() {
                 }
             }
         } else {
-            // MOLTIPLICATORE PITCH (Cerchio = x10 Precisione/Velocita)
             int shift = (pad.Buttons & PSP_CTRL_CIRCLE) ? 1 : 0;
             float step = shift ? 1.0f : 0.1f;
 
-            // PITCH DA TASTI R/L
             if (pressed & PSP_CTRL_LTRIGGER) {
                 deckA.pitch -= step;
                 if (deckA.pitch < -16.0f) deckA.pitch = -16.0f;
@@ -295,21 +285,18 @@ int main() {
                 if (deckA.pitch > 16.0f) deckA.pitch = 16.0f;
             }
 
-            // PITCH DA STICK ANALOGICO (Su = Aumenta Pitch, Giu = Riduce Pitch)
-            if (pad.Ly < 80) { // Levettina Spinta in Alto
+            if (pad.Ly < 80) {
                 deckA.pitch += 0.05f;
                 if (deckA.pitch > 16.0f) deckA.pitch = 16.0f;
-            } else if (pad.Ly > 175) { // Levettina Spinta in Basso
+            } else if (pad.Ly > 175) {
                 deckA.pitch -= 0.05f;
                 if (deckA.pitch < -16.0f) deckA.pitch = -16.0f;
             }
 
-            // CONTROLLO PLAY / PAUSE (Tasto X)
             if (pressed & PSP_CTRL_CROSS) {
                 deckA.is_playing = !deckA.is_playing;
             }
 
-            // CONTROLLO CUE (Tasto QUADRATO - Ferma e Torna all'inizio)
             if (pressed & PSP_CTRL_SQUARE) {
                 deckA.is_playing = 0;
                 deckA.progress = 0.0f;
@@ -323,7 +310,6 @@ int main() {
             deckA.current_bpm = deckA.base_bpm * (1.0f + (deckA.pitch / 100.0f));
         }
 
-        // Decodifica e output audio in tempo reale
         if (deckA.is_playing && mp3_decoder_inited && deckA.mp3_handle >= 0) {
             FillMp3Buffer(deckA.handle, deckA.mp3_handle);
             int decoded = sceMp3Decode(deckA.mp3_handle, (short**)pcm_buf);
@@ -336,7 +322,6 @@ int main() {
 
         last_buttons = pad.Buttons;
 
-        // --- RENDER INTERFACCIA ---
         pspDebugScreenSetXY(0, 0);
         
         if (browser_open) {
