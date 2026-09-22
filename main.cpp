@@ -65,7 +65,7 @@ void SetupCallbacks() {
     if (thid >= 0) sceKernelStartThread(thid, 0, 0);
 }
 
-// Estrattore robusto per il tag TBPM di Rekordbox
+// Estrattore per il tag TBPM di Rekordbox
 float ReadRekordboxBPM(const char* fullpath) {
     int fd = sceIoOpen(fullpath, PSP_O_RDONLY, 0777);
     if (fd < 0) return 0.0f;
@@ -157,18 +157,14 @@ void ScanPath(const char* path) {
     selected_index = 0;
 }
 
-// Riempimento buffer MP3 basato su API nativa PSP
+// Alimentazione dello stream MP3
 int FillMp3Buffer(int fd, int mp3_handle) {
-    SceUchar* buf_ptr = NULL;
-    SceInt32 buf_size = 0;
-
     if (sceMp3CheckStreamDataNeeded(mp3_handle) > 0) {
-        buf_size = sceMp3GetMp3Buf(mp3_handle, &buf_ptr);
-        if (buf_ptr && buf_size > 0) {
-            int read_bytes = sceIoRead(fd, buf_ptr, buf_size);
-            if (read_bytes > 0) {
-                sceMp3NotifyAddStreamData(mp3_handle, read_bytes);
-            }
+        unsigned char* buf_ptr = mp3_buf;
+        int buf_size = MP3_BUF_SIZE;
+        int read_bytes = sceIoRead(fd, buf_ptr, buf_size);
+        if (read_bytes > 0) {
+            sceMp3NotifyAddStreamData(mp3_handle, read_bytes);
         }
     }
     return 1;
