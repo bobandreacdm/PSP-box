@@ -217,9 +217,18 @@ void LoadTrack(const char* filename, const char* fullpath) {
     sceIoLseek(deckA.handle, data_start, PSP_SEEK_SET);
     deckA.current_pos = data_start;
 
-    if (sceMp3InitResource() < 0) {
-        snprintf(deckA.status_msg, 128, "ERRORE: InitResource fallito!");
-        return;
+    // FORZA IL RESET DELLA RISORSA MP3 PER EVITARE L'ERRORE INITRESOURCE
+    if (mp3_decoder_inited) {
+        sceMp3TermResource();
+        mp3_decoder_inited = 0;
+    }
+
+    int res_init = sceMp3InitResource();
+    if (res_init < 0) {
+        // Se restituisce un codice di risorsa già attiva non bloccante, procediamo comunque
+        if (res_init != -1 && res_init != (int)0x80671001) { 
+            snprintf(deckA.status_msg, 128, "InitRes Err: 0x%08X", res_init);
+        }
     }
     mp3_decoder_inited = 1;
 
@@ -234,13 +243,13 @@ void LoadTrack(const char* filename, const char* fullpath) {
 
     deckA.mp3_handle = sceMp3ReserveMp3Handle(&mp3Init);
     if (deckA.mp3_handle < 0) {
-        snprintf(deckA.status_msg, 128, "ERRORE: ReserveHandle fallito (%d)", deckA.mp3_handle);
+        snprintf(deckA.status_msg, 128, "ERRORE: ReserveHandle (%d)", deckA.mp3_handle);
         return;
     }
 
     int init_res = sceMp3Init(deckA.mp3_handle);
     if (init_res < 0) {
-        snprintf(deckA.status_msg, 128, "ERRORE: sceMp3Init fallito (%d)", init_res);
+        snprintf(deckA.status_msg, 128, "ERRORE: sceMp3Init (%d)", init_res);
         return;
     }
 
@@ -251,9 +260,12 @@ void LoadTrack(const char* filename, const char* fullpath) {
     if (deckA.sample_rate <= 0) deckA.sample_rate = 44100;
     if (deckA.channels <= 0) deckA.channels = 2;
 
-    audio_channel = sceAudioChReserve(PSP_AUDIO_NEXT_CHANNEL, 1152, PSP_AUDIO_FORMAT_STEREO);
     if (audio_channel < 0) {
-        snprintf(deckA.status_msg, 128, "ERRORE: Canale Audio occupato (%d)", audio_channel);
+        audio_channel = sceAudioChReserve(PSP_AUDIO_NEXT_CHANNEL, 1152, PSP_AUDIO_FORMAT_STEREO);
+    }
+
+    if (audio_channel < 0) {
+        snprintf(deckA.status_msg, 128, "ERRORE: AudioChReserve (%d)", audio_channel);
         return;
     }
 
@@ -379,7 +391,6 @@ int main() {
             int decoded_bytes = sceMp3Decode(deckA.mp3_handle, &pcm_ptr);
             
             if (decoded_bytes > 0) {
-                int samples = decoded_bytes / (deckA.channels * sizeof(short));
                 sceAudioOutputPannedBlocking(audio_channel, PSP_AUDIO_VOLUME_MAX, PSP_AUDIO_VOLUME_MAX, pcm_ptr);
                 
                 if (deckA.file_size > 0) {
@@ -416,7 +427,7 @@ int main() {
             pspDebugScreenPrintf(" [D-PAD]: Scorri  |  [X]: Seleziona  |  [TRIANGOLO]: DECK\n");
         } else {
             pspDebugScreenPrintf("==================================================\n");
-            pspDebugScreenPrintf("         PSPBox DJ - v1.9 (DIAGNOSTIC & FIX)      \n");
+            pspDebugScreenPrintf("         PSPBox DJ - v1.9 (FIX RESOURCE)          \n");
             pspDebugScreenPrintf("==================================================\n\n");
 
             pspDebugScreenPrintf("   TRACCIA :  %s\n", deckA.title);
