@@ -7,12 +7,8 @@ ASFLAGS = $(CFLAGS)
 
 LIBS = -lpspaudio -lpspdebug -lpspge -lpspdisplay -lpspctrl -lpspsdk
 
-# Abilita la struttura PRX obbligatoria per CFW
-BUILD_PRX = 1
-PSP_FW_VERSION = 500
-
 EXTRA_TARGETS = EBOOT.PBP
-PSP_EBOOT_TITLE = PSPBox DJ v1.9.3
+PSP_EBOOT_TITLE = PSPBox DJ v1.9.4
 
 PSPSDK=$(shell psp-config --pspsdk-path)
 include $(PSPSDK)/lib/build.mak
