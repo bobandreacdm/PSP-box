@@ -1,17 +1,14 @@
 TARGET = PSPBox
 OBJS = main.o
 
-INCDIR = 
 CFLAGS = -O2 -G0 -Wall
 CXXFLAGS = $(CFLAGS) -fno-exceptions -fno-rtti
 ASFLAGS = $(CFLAGS)
 
-LIBDIR =
-LDFLAGS =
-LIBS = -lpspmp3 -lpspaudiolib -lpspaudio -lpspdebug -lpspdisplay -lpspge -lpsputility -lpspgu -lpspctrl
+LIBS = -lpspaudio -lpspdebug -lpspge -lpspdisplay -lpspctrl
 
 EXTRA_TARGETS = EBOOT.PBP
-PSP_EBOOT_TITLE = PSPBox v1.8 MP3 Player
+PSP_EBOOT_TITLE = PSPBox DJ v1.9.2
 
-PSPSDK=$(shell psp-config --pspsdk-path)
+PSPSDK=$(shell psp-config --psp-dev-kit-dir)
 include $(PSPSDK)/lib/build.mak
