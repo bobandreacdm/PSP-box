@@ -15,10 +15,11 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v3
 
-    - name: Build EBOOT.PBP
+    - name: Build and Pack EBOOT.PBP
       run: |
         make clean
         make
+        pack-eboot -s "PSPBox DJ" -o EBOOT.PBP PSPBox.elf
 
     - name: Upload EBOOT Artifact
       uses: actions/upload-artifact@v3
