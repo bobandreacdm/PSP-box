@@ -2,29 +2,24 @@
 #include <pspdebug.h>
 #include <pspctrl.h>
 #include <pspaudio.h>
-#include <pspmp3.h>
-#include <psputility.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <malloc.h>
+
+// Definizione del decodificatore MP3 software C puro (Minimp3)
+#define MINIMP3_IMPLEMENTATION
+#include "minimp3.h"
 
 PSP_MODULE_INFO("PSPBox", 0, 1, 9);
 PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);
 
-#define MP3_BUF_SIZE (16 * 1024)
-#define PCM_BUF_SIZE (16 * 1024)
 #define MAX_FILES 100
-
-// Pointers per buffer allocati dinamicamente allineati a 64 byte
-static unsigned char* mp3_buf = NULL;
-static short* pcm_buf = NULL;
+#define AUDIO_BUF_SAMPLES 1152
 
 struct Deck {
     char title[64];
     char full_path[256];
     int handle;
-    int mp3_handle;
     long file_size;
     long current_pos;
     float base_bpm;
@@ -44,13 +39,18 @@ struct FileEntry {
     char fullpath[256];
 };
 
-Deck deckA;
-FileEntry file_list[MAX_FILES];
-int file_count = 0;
-int selected_file = 0;
-int in_browser = 0;
-int audio_channel = -1;
-int mp3_decoder_inited = 0;
+static Deck deckA;
+static FileEntry file_list[MAX_FILES];
+static int file_count = 0;
+static int selected_file = 0;
+static int in_browser = 0;
+static int audio_channel = -1;
+
+// Decoder software Minimp3
+static mp3dec_t mp3d;
+static mp3dec_frame_info_t info;
+static unsigned char input_buf[2048];
+static short pcm_output[MINIMP3_MAX_SAMPLES_PER_FRAME];
 
 int exit_callback(int arg1, int arg2, void *common) {
     sceKernelExitGame();
@@ -69,57 +69,6 @@ void SetupCallbacks(void) {
     if (thid >= 0) {
         sceKernelStartThread(thid, 0, 0);
     }
-}
-
-float ReadRekordboxBPM(const char* fullpath) {
-    int fd = sceIoOpen(fullpath, PSP_O_RDONLY, 0777);
-    if (fd < 0) return 0.0f;
-
-    unsigned char buffer[1024];
-    int read_bytes = sceIoRead(fd, buffer, sizeof(buffer) - 1);
-    sceIoClose(fd);
-
-    if (read_bytes <= 0) return 0.0f;
-
-    for (int i = 0; i < read_bytes - 4; i++) {
-        if (buffer[i] == 'T' && buffer[i+1] == 'B' && buffer[i+2] == 'P' && buffer[i+3] == 'M') {
-            int frame_size = (buffer[i+4] << 21) | (buffer[i+5] << 14) | (buffer[i+6] << 7) | buffer[i+7];
-            if (frame_size > 0 && frame_size < 32 && (i + 10 + frame_size) <= read_bytes) {
-                char bpm_str[32];
-                memset(bpm_str, 0, sizeof(bpm_str));
-                int text_offset = i + 10;
-                if (buffer[text_offset] == 0) text_offset++;
-                
-                int len = 0;
-                for (int j = text_offset; j < i + 10 + frame_size && len < 31; j++) {
-                    if (buffer[j] >= 32 && buffer[j] <= 126) {
-                        bpm_str[len++] = (char)buffer[j];
-                    }
-                }
-                bpm_str[len] = '\0';
-                float parsed_bpm = (float)atof(bpm_str);
-                if (parsed_bpm > 30.0f && parsed_bpm < 300.0f) {
-                    return parsed_bpm;
-                }
-            }
-        }
-    }
-    return 0.0f;
-}
-
-long GetAudioStartDataOffset(int fd) {
-    sceIoLseek(fd, 0, PSP_SEEK_SET);
-    unsigned char header[10];
-    if (sceIoRead(fd, header, 10) < 10) return 0;
-
-    if (header[0] == 'I' && header[1] == 'D' && header[2] == '3') {
-        long tag_size = ((header[6] & 0x7F) << 21) |
-                        ((header[7] & 0x7F) << 14) |
-                        ((header[8] & 0x7F) << 7)  |
-                         (header[9] & 0x7F);
-        return tag_size + 10;
-    }
-    return 0;
 }
 
 void ScanMusicDirectory() {
@@ -145,11 +94,6 @@ void ScanMusicDirectory() {
 
 void StopAndCloseAudio() {
     deckA.is_playing = 0;
-    
-    if (deckA.mp3_handle >= 0) {
-        sceMp3ReleaseMp3Handle(deckA.mp3_handle);
-        deckA.mp3_handle = -1;
-    }
     if (deckA.handle >= 0) {
         sceIoClose(deckA.handle);
         deckA.handle = -1;
@@ -160,31 +104,14 @@ void StopAndCloseAudio() {
     }
 }
 
-void FillMp3Buffer(int fd, int mp3Handle) {
-    SceUChar8* dst = NULL;
-    SceInt32 towrite = 0;
-    SceInt32 srcpos = 0;
-
-    int ret = sceMp3GetInfoToAddStreamData(mp3Handle, &dst, &towrite, &srcpos);
-    if (ret >= 0 && towrite > 0) {
-        sceIoLseek(fd, srcpos, PSP_SEEK_SET);
-        int read = sceIoRead(fd, dst, towrite);
-        if (read > 0) {
-            sceMp3NotifyAddStreamData(mp3Handle, read);
-        }
-    }
-}
-
 void LoadTrack(const char* filename, const char* fullpath) {
     StopAndCloseAudio();
 
     snprintf(deckA.title, 64, "%s", filename);
     snprintf(deckA.full_path, 256, "%s", fullpath);
 
-    float rekordbox_bpm = ReadRekordboxBPM(fullpath);
-    deckA.base_bpm = (rekordbox_bpm > 0.0f) ? rekordbox_bpm : 120.0f;
-    deckA.bpm_found = (rekordbox_bpm > 0.0f) ? 1 : 0;
-
+    deckA.base_bpm = 120.0f;
+    deckA.bpm_found = 0;
     deckA.pitch = 0.0f;
     deckA.pitch_bend = 0.0f;
     deckA.current_bpm = deckA.base_bpm;
@@ -197,45 +124,28 @@ void LoadTrack(const char* filename, const char* fullpath) {
     }
 
     deckA.file_size = sceIoLseek(deckA.handle, 0, PSP_SEEK_END);
-    long data_start = GetAudioStartDataOffset(deckA.handle);
-    sceIoLseek(deckA.handle, data_start, PSP_SEEK_SET);
-    deckA.current_pos = data_start;
+    sceIoLseek(deckA.handle, 0, PSP_SEEK_SET);
 
-    if (!mp3_decoder_inited) {
-        sceMp3InitResource();
-        mp3_decoder_inited = 1;
+    // Inizializza decoder software
+    mp3dec_init(&mp3d);
+
+    // Leggi primo frame per identificare sample rate e canali
+    int read_bytes = sceIoRead(deckA.handle, input_buf, sizeof(input_buf));
+    if (read_bytes > 0) {
+        int samples = mp3dec_decode_frame(&mp3d, input_buf, read_bytes, pcm_output, &info);
+        if (samples > 0) {
+            deckA.sample_rate = info.hz;
+            deckA.channels = info.channels;
+        } else {
+            deckA.sample_rate = 44100;
+            deckA.channels = 2;
+        }
+        // Riporta il cursore all'inizio del file
+        sceIoLseek(deckA.handle, 0, PSP_SEEK_SET);
     }
-
-    SceMp3InitArg mp3Init;
-    memset(&mp3Init, 0, sizeof(SceMp3InitArg));
-    mp3Init.mp3StreamStart = data_start;
-    mp3Init.mp3StreamEnd = deckA.file_size;
-    mp3Init.mp3Buf = mp3_buf;
-    mp3Init.mp3BufSize = MP3_BUF_SIZE;
-    mp3Init.pcmBuf = (unsigned char*)pcm_buf;
-    mp3Init.pcmBufSize = PCM_BUF_SIZE;
-
-    deckA.mp3_handle = sceMp3ReserveMp3Handle(&mp3Init);
-    if (deckA.mp3_handle < 0) {
-        snprintf(deckA.status_msg, 128, "Err ReserveHandle: 0x%08X", deckA.mp3_handle);
-        return;
-    }
-
-    int init_res = sceMp3Init(deckA.mp3_handle);
-    if (init_res < 0) {
-        snprintf(deckA.status_msg, 128, "Err sceMp3Init: 0x%08X", init_res);
-        return;
-    }
-
-    FillMp3Buffer(deckA.handle, deckA.mp3_handle);
-
-    deckA.sample_rate = sceMp3GetSamplingRate(deckA.mp3_handle);
-    deckA.channels = sceMp3GetMp3ChannelNum(deckA.mp3_handle);
-    if (deckA.sample_rate <= 0) deckA.sample_rate = 44100;
-    if (deckA.channels <= 0) deckA.channels = 2;
 
     if (audio_channel < 0) {
-        audio_channel = sceAudioChReserve(PSP_AUDIO_NEXT_CHANNEL, 1152, PSP_AUDIO_FORMAT_STEREO);
+        audio_channel = sceAudioChReserve(PSP_AUDIO_NEXT_CHANNEL, AUDIO_BUF_SAMPLES, PSP_AUDIO_FORMAT_STEREO);
     }
 
     if (audio_channel < 0) {
@@ -247,25 +157,28 @@ void LoadTrack(const char* filename, const char* fullpath) {
 }
 
 void UpdateAudio() {
-    if (!deckA.is_playing || deckA.mp3_handle < 0 || audio_channel < 0) return;
+    if (!deckA.is_playing || deckA.handle < 0 || audio_channel < 0) return;
 
-    if (sceMp3CheckStreamDataNeeded(deckA.mp3_handle)) {
-        FillMp3Buffer(deckA.handle, deckA.mp3_handle);
+    // Leggi e decodifica frame per frame in C puro via CPU
+    int read_bytes = sceIoRead(deckA.handle, input_buf, sizeof(input_buf));
+    if (read_bytes <= 0) {
+        deckA.is_playing = 0;
+        snprintf(deckA.status_msg, 128, "Fine Traccia");
+        return;
     }
 
-    short* decoded_pcm = NULL;
-    int decoded_bytes = sceMp3Decode(deckA.mp3_handle, &decoded_pcm);
+    int samples = mp3dec_decode_frame(&mp3d, input_buf, read_bytes, pcm_output, &info);
+    if (samples > 0 && info.frame_bytes > 0) {
+        // Ripristina la posizione esatta dopo la decodifica del frame
+        long cur = sceIoLseek(deckA.handle, 0, PSP_SEEK_CUR);
+        sceIoLseek(deckA.handle, cur - (read_bytes - info.frame_bytes), PSP_SEEK_SET);
 
-    if (decoded_bytes > 0 && decoded_pcm != NULL) {
-        sceAudioOutputPannedBlocking(audio_channel, PSP_AUDIO_VOLUME_MAX, PSP_AUDIO_VOLUME_MAX, decoded_pcm);
+        sceAudioOutputPannedBlocking(audio_channel, PSP_AUDIO_VOLUME_MAX, PSP_AUDIO_VOLUME_MAX, pcm_output);
 
         deckA.current_pos = sceIoLseek(deckA.handle, 0, PSP_SEEK_CUR);
         if (deckA.file_size > 0) {
             deckA.progress = ((float)deckA.current_pos / (float)deckA.file_size) * 100.0f;
         }
-    } else if (decoded_bytes == 0) {
-        deckA.is_playing = 0;
-        snprintf(deckA.status_msg, 128, "Fine Traccia");
     }
 }
 
@@ -274,7 +187,7 @@ void RenderUI() {
     pspDebugScreenSetTextColor(0x00FFFFFF);
 
     printf("==================================================\n");
-    printf("         PSPBox DJ - v1.9.1 (FIX BOOT)            \n");
+    printf("         PSPBox DJ - v1.9.2 (SOFTWARE DECODER)     \n");
     printf("==================================================\n\n");
 
     if (in_browser) {
@@ -298,12 +211,7 @@ void RenderUI() {
         printf(" TRACCIA : %s\n", deckA.title[0] ? deckA.title : "Nessuna");
         printf(" STATO   : %s\n\n", deckA.status_msg);
 
-        if (deckA.bpm_found) {
-            printf(" BPM     : %.1f  (Base: %.1f) [REKORDBOX OK]\n", deckA.current_bpm, deckA.base_bpm);
-        } else {
-            printf(" BPM     : %.1f  (Base: %.1f) [DEFAULT 120]\n", deckA.current_bpm, deckA.base_bpm);
-        }
-
+        printf(" BPM     : %.1f  (Base: %.1f)\n", deckA.current_bpm, deckA.base_bpm);
         printf(" PITCH   : %+.1f%%\n\n", deckA.pitch + deckA.pitch_bend);
         printf(" AUDIO   : [%s]\n\n", deckA.is_playing ? "PLAYING" : "PAUSED / CUE");
 
@@ -324,28 +232,12 @@ void RenderUI() {
 }
 
 int main(void) {
-    // 1. Inizializzazione Schermo immediata
     pspDebugScreenInit();
     SetupCallbacks();
 
-    // 2. Allocazione dinamica con allineamento 64 byte
-    mp3_buf = (unsigned char*)memalign(64, MP3_BUF_SIZE);
-    pcm_buf = (short*)memalign(64, PCM_BUF_SIZE);
-
-    if (!mp3_buf || !pcm_buf) {
-        printf("Errore allocazione memoria 64-byte!\n");
-        sceKernelDelayThread(3000000);
-        sceKernelExitGame();
-        return 0;
-    }
-
     memset(&deckA, 0, sizeof(Deck));
     deckA.handle = -1;
-    deckA.mp3_handle = -1;
-    snprintf(deckA.status_msg, 128, "Seleziona una traccia dal Browser");
-
-    // 3. Scansione file
-    ScanMusicDirectory();
+    snprintf(deckA.status_msg, 128, "Premi TRIANGOLO per selezionare un brano");
 
     SceCtrlData pad;
     unsigned int last_buttons = 0;
@@ -374,18 +266,15 @@ int main(void) {
                 in_browser = 1;
             }
             if (pressed & PSP_CTRL_CROSS) {
-                if (deckA.mp3_handle >= 0) {
+                if (deckA.handle >= 0) {
                     deckA.is_playing = !deckA.is_playing;
                     snprintf(deckA.status_msg, 128, deckA.is_playing ? "In riproduzione" : "Pausa");
                 }
             }
             if (pressed & PSP_CTRL_SQUARE) {
                 deckA.is_playing = 0;
-                if (deckA.handle >= 0 && deckA.mp3_handle >= 0) {
-                    long data_start = GetAudioStartDataOffset(deckA.handle);
-                    sceIoLseek(deckA.handle, data_start, PSP_SEEK_SET);
-                    sceMp3ResetPlayPosition(deckA.mp3_handle);
-                    FillMp3Buffer(deckA.handle, deckA.mp3_handle);
+                if (deckA.handle >= 0) {
+                    sceIoLseek(deckA.handle, 0, PSP_SEEK_SET);
                     deckA.progress = 0.0f;
                     snprintf(deckA.status_msg, 128, "CUE (Inizio traccia)");
                 }
@@ -420,12 +309,5 @@ int main(void) {
     }
 
     StopAndCloseAudio();
-    if (mp3_decoder_inited) {
-        sceMp3TermResource();
-    }
-
-    if (mp3_buf) free(mp3_buf);
-    if (pcm_buf) free(pcm_buf);
-
     return 0;
 }
