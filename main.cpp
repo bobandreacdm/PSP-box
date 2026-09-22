@@ -116,7 +116,7 @@ void LoadTrack(const char* filename, const char* fullpath) {
 
     deckA.handle = sceIoOpen(fullpath, PSP_O_RDONLY, 0777);
     if (deckA.handle < 0) {
-        snprintf(deckA.status_msg, 128, "ERRORE: Impossibile aprire file");
+        snprintf(deckA.status_msg, 128, "ERRORE: Impossibile aprire il file");
         return;
     }
 
