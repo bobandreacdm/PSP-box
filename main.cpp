@@ -6,7 +6,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Definizione del decodificatore MP3 software C puro (Minimp3)
 #define MINIMP3_IMPLEMENTATION
 #include "minimp3.h"
 
@@ -46,7 +45,6 @@ static int selected_file = 0;
 static int in_browser = 0;
 static int audio_channel = -1;
 
-// Decoder software Minimp3
 static mp3dec_t mp3d;
 static mp3dec_frame_info_t info;
 static unsigned char input_buf[2048];
@@ -126,10 +124,8 @@ void LoadTrack(const char* filename, const char* fullpath) {
     deckA.file_size = sceIoLseek(deckA.handle, 0, PSP_SEEK_END);
     sceIoLseek(deckA.handle, 0, PSP_SEEK_SET);
 
-    // Inizializza decoder software
     mp3dec_init(&mp3d);
 
-    // Leggi primo frame per identificare sample rate e canali
     int read_bytes = sceIoRead(deckA.handle, input_buf, sizeof(input_buf));
     if (read_bytes > 0) {
         int samples = mp3dec_decode_frame(&mp3d, input_buf, read_bytes, pcm_output, &info);
@@ -140,7 +136,6 @@ void LoadTrack(const char* filename, const char* fullpath) {
             deckA.sample_rate = 44100;
             deckA.channels = 2;
         }
-        // Riporta il cursore all'inizio del file
         sceIoLseek(deckA.handle, 0, PSP_SEEK_SET);
     }
 
@@ -159,7 +154,6 @@ void LoadTrack(const char* filename, const char* fullpath) {
 void UpdateAudio() {
     if (!deckA.is_playing || deckA.handle < 0 || audio_channel < 0) return;
 
-    // Leggi e decodifica frame per frame in C puro via CPU
     int read_bytes = sceIoRead(deckA.handle, input_buf, sizeof(input_buf));
     if (read_bytes <= 0) {
         deckA.is_playing = 0;
@@ -169,7 +163,6 @@ void UpdateAudio() {
 
     int samples = mp3dec_decode_frame(&mp3d, input_buf, read_bytes, pcm_output, &info);
     if (samples > 0 && info.frame_bytes > 0) {
-        // Ripristina la posizione esatta dopo la decodifica del frame
         long cur = sceIoLseek(deckA.handle, 0, PSP_SEEK_CUR);
         sceIoLseek(deckA.handle, cur - (read_bytes - info.frame_bytes), PSP_SEEK_SET);
 
