@@ -10,7 +10,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Download minimp3.h
-        run: curl -sL https://raw.githubusercontent.com/lieff/minimp3/master/minimp3.h -o minimp3.h
+        run: wget https://raw.githubusercontent.com/lieff/minimp3/master/minimp3.h -O minimp3.h
 
       - name: Build Game
         run: make
