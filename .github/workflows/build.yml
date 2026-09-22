@@ -13,7 +13,7 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
     - name: Build and Pack EBOOT.PBP
       run: |
@@ -22,7 +22,7 @@ jobs:
         pack-eboot -s "PSPBox DJ" -o EBOOT.PBP PSPBox.elf
 
     - name: Upload EBOOT Artifact
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: PSPBox-EBOOT
         path: EBOOT.PBP
