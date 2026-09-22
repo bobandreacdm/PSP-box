@@ -1,7 +1,7 @@
 TARGET = PSPBox
 OBJS = main.o
 
-CFLAGS = -O2 -G0 -Wall
+CFLAGS = -O2 -G0 -Wall -DMINIMP3_IMPLEMENTATION
 CXXFLAGS = $(CFLAGS) -fno-exceptions -fno-rtti
 ASFLAGS = $(CFLAGS)
 
