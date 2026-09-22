@@ -8,7 +8,7 @@ ASFLAGS = $(CFLAGS)
 LIBS = -lpspaudio -lpspdebug -lpspge -lpspdisplay -lpspctrl -lpspsdk
 
 EXTRA_TARGETS = EBOOT.PBP
-PSP_EBOOT_TITLE = PSPBox DJ v1.9.4
+PSP_EBOOT_TITLE = PSPBox DJ
 
 PSPSDK=$(shell psp-config --pspsdk-path)
 include $(PSPSDK)/lib/build.mak
