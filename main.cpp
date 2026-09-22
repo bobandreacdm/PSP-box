@@ -9,8 +9,10 @@
 #define MINIMP3_IMPLEMENTATION
 #include "minimp3.h"
 
+/* Definizione modulo PSP */
 PSP_MODULE_INFO("PSPBox", 0, 1, 9);
-PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);
+PSP_MAIN_THREAD_ATTR(PSP_THREAD_ATTR_USER | PSP_THREAD_ATTR_VFPU);
+PSP_MAIN_THREAD_STACK_SIZE_KB(2048); // Forza uno stack di memoria adeguato
 
 #define MAX_FILES 100
 #define AUDIO_BUF_SAMPLES 1152
@@ -43,17 +45,15 @@ static int file_count = 0;
 static int selected_file = 0;
 static int in_browser = 0;
 static int audio_channel = -1;
-static int running = 1;
 
 static mp3dec_t mp3d;
 static mp3dec_frame_info_t info;
 
-// Buffer allineati in memoria per evitare crash di sistema PSP
 static unsigned char input_buf[4096] __attribute__((aligned(64)));
 static short pcm_output[MINIMP3_MAX_SAMPLES_PER_FRAME] __attribute__((aligned(64)));
 
+/* Callbacks per l'uscita pulita dal gioco */
 int exit_callback(int arg1, int arg2, void *common) {
-    running = 0;
     sceKernelExitGame();
     return 0;
 }
@@ -137,42 +137,35 @@ void LoadTrack(const char* filename, const char* fullpath) {
         sceIoLseek(deckA.handle, 0, PSP_SEEK_SET);
     }
 
+    if (audio_channel < 0) {
+        audio_channel = sceAudioChReserve(PSP_AUDIO_NEXT_CHANNEL, AUDIO_BUF_SAMPLES, PSP_AUDIO_FORMAT_STEREO);
+    }
+
     snprintf(deckA.status_msg, 128, "Pronto (%d Hz, %d ch)", deckA.sample_rate, deckA.channels);
 }
 
-// Thread separato per l'audio per non bloccare la schermata principale
-int AudioThread(SceSize args, void *argp) {
-    audio_channel = sceAudioChReserve(PSP_AUDIO_NEXT_CHANNEL, AUDIO_BUF_SAMPLES, PSP_AUDIO_FORMAT_STEREO);
+void ProcessAudio() {
+    if (!deckA.is_playing || deckA.handle < 0 || audio_channel < 0) return;
 
-    while (running) {
-        if (deckA.is_playing && deckA.handle >= 0 && audio_channel >= 0) {
-            int read_bytes = sceIoRead(deckA.handle, input_buf, sizeof(input_buf));
-            if (read_bytes <= 0) {
-                deckA.is_playing = 0;
-                snprintf(deckA.status_msg, 128, "Fine Traccia");
-            } else {
-                int samples = mp3dec_decode_frame(&mp3d, input_buf, read_bytes, pcm_output, &info);
-                if (samples > 0 && info.frame_bytes > 0) {
-                    long cur = sceIoLseek(deckA.handle, 0, PSP_SEEK_CUR);
-                    sceIoLseek(deckA.handle, cur - (read_bytes - info.frame_bytes), PSP_SEEK_SET);
+    int read_bytes = sceIoRead(deckA.handle, input_buf, sizeof(input_buf));
+    if (read_bytes <= 0) {
+        deckA.is_playing = 0;
+        snprintf(deckA.status_msg, 128, "Fine Traccia");
+        return;
+    }
 
-                    sceAudioOutputPannedBlocking(audio_channel, PSP_AUDIO_VOLUME_MAX, PSP_AUDIO_VOLUME_MAX, pcm_output);
+    int samples = mp3dec_decode_frame(&mp3d, input_buf, read_bytes, pcm_output, &info);
+    if (samples > 0 && info.frame_bytes > 0) {
+        long cur = sceIoLseek(deckA.handle, 0, PSP_SEEK_CUR);
+        sceIoLseek(deckA.handle, cur - (read_bytes - info.frame_bytes), PSP_SEEK_SET);
 
-                    deckA.current_pos = sceIoLseek(deckA.handle, 0, PSP_SEEK_CUR);
-                    if (deckA.file_size > 0) {
-                        deckA.progress = ((float)deckA.current_pos / (float)deckA.file_size) * 100.0f;
-                    }
-                }
-            }
-        } else {
-            sceKernelDelayThread(10000); // 10ms sleep se in pausa
+        sceAudioOutputPannedBlocking(audio_channel, PSP_AUDIO_VOLUME_MAX, PSP_AUDIO_VOLUME_MAX, pcm_output);
+
+        deckA.current_pos = sceIoLseek(deckA.handle, 0, PSP_SEEK_CUR);
+        if (deckA.file_size > 0) {
+            deckA.progress = ((float)deckA.current_pos / (float)deckA.file_size) * 100.0f;
         }
     }
-
-    if (audio_channel >= 0) {
-        sceAudioChRelease(audio_channel);
-    }
-    return 0;
 }
 
 void RenderUI() {
@@ -180,7 +173,7 @@ void RenderUI() {
     pspDebugScreenSetTextColor(0x00FFFFFF);
 
     printf("==================================================\n");
-    printf("         PSPBox DJ - v1.9.2 (STABLE BUILD)        \n");
+    printf("         PSPBox DJ - v1.9.3 (SAFE BOOT)           \n");
     printf("==================================================\n\n");
 
     if (in_browser) {
@@ -225,24 +218,20 @@ void RenderUI() {
 }
 
 int main(void) {
-    // Inizializza subito lo schermo
+    /* 1. Inizializzazione Video Primario */
     pspDebugScreenInit();
+    
+    /* 2. Setup dei Callback di sistema */
     SetupCallbacks();
 
     memset(&deckA, 0, sizeof(Deck));
     deckA.handle = -1;
     snprintf(deckA.status_msg, 128, "Premi TRIANGOLO per selezionare un brano");
 
-    // Crea ed avvia il thread audio separato
-    int athid = sceKernelCreateThread("audio_thread", AudioThread, 0x12, 0x10000, 0, NULL);
-    if (athid >= 0) {
-        sceKernelStartThread(athid, 0, NULL);
-    }
-
     SceCtrlData pad;
     unsigned int last_buttons = 0;
 
-    while (running) {
+    while (1) {
         sceCtrlPeekBufferPositive(&pad, 1);
         unsigned int pressed = pad.Buttons & ~last_buttons;
 
@@ -302,9 +291,13 @@ int main(void) {
 
         last_buttons = pad.Buttons;
 
+        /* Gestione audio sincrona e leggera */
+        ProcessAudio();
+
+        /* Rendering Schermo */
         RenderUI();
 
-        sceKernelDelayThread(16000); // Frame rate ~60fps
+        sceKernelDelayThread(10000);
     }
 
     StopAndCloseAudio();
