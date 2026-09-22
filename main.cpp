@@ -11,7 +11,7 @@
 #include <string.h>
 #include <dirent.h>
 
-PSP_MODULE_INFO("PSPBox", 0, 1, 8);
+PSP_MODULE_INFO("PSPBox", 0, 1, 9);
 PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER);
 
 #define MP3_BUF_SIZE (16 * 1024)
@@ -27,7 +27,8 @@ typedef struct {
     char full_path[256];
     float base_bpm;
     float current_bpm;
-    float pitch;
+    float pitch;            // Pitch fisso impostato
+    float pitch_bend;       // Spinta temporanea da analogico Sinistra/Destra
     int is_playing;
     float progress;
     int handle;
@@ -35,7 +36,7 @@ typedef struct {
     int bpm_found;
 } DeckState;
 
-DeckState deckA = {"Nessuna Traccia", "", 120.0f, 120.0f, 0.0f, 0, 0.0f, -1, -1, 0};
+DeckState deckA = {"Nessuna Traccia", "", 120.0f, 120.0f, 0.0f, 0.0f, 0, 0.0f, -1, -1, 0};
 
 int browser_open = 0;
 char current_path[256] = "ms0:/MUSIC";
@@ -65,24 +66,22 @@ void SetupCallbacks() {
     if (thid >= 0) sceKernelStartThread(thid, 0, 0);
 }
 
-// Estrattore per il tag TBPM di Rekordbox
+// Scansione robusta del tag TBPM di Rekordbox
 float ReadRekordboxBPM(const char* fullpath) {
     int fd = sceIoOpen(fullpath, PSP_O_RDONLY, 0777);
     if (fd < 0) return 0.0f;
 
-    unsigned char buffer[4096];
+    unsigned char buffer[8192];
     int read_bytes = sceIoRead(fd, buffer, sizeof(buffer));
     sceIoClose(fd);
 
-    if (read_bytes < 10 || buffer[0] != 'I' || buffer[1] != 'D' || buffer[2] != '3') {
-        return 0.0f;
-    }
+    if (read_bytes < 10) return 0.0f;
 
-    for (int i = 0; i < read_bytes - 15; i++) {
+    for (int i = 0; i < read_bytes - 12; i++) {
         if (buffer[i] == 'T' && buffer[i+1] == 'B' && buffer[i+2] == 'P' && buffer[i+3] == 'M') {
             char bpm_str[16] = {0};
             int idx = 0;
-            for (int j = i + 10; j < i + 25 && j < read_bytes; j++) {
+            for (int j = i + 6; j < i + 30 && j < read_bytes; j++) {
                 char c = buffer[j];
                 if ((c >= '0' && c <= '9') || c == '.') {
                     bpm_str[idx++] = c;
@@ -97,7 +96,6 @@ float ReadRekordboxBPM(const char* fullpath) {
             }
         }
     }
-
     return 0.0f;
 }
 
@@ -157,17 +155,13 @@ void ScanPath(const char* path) {
     selected_index = 0;
 }
 
-// Alimentazione dello stream MP3
-int FillMp3Buffer(int fd, int mp3_handle) {
+void FillMp3Buffer(int fd, int mp3_handle) {
     if (sceMp3CheckStreamDataNeeded(mp3_handle) > 0) {
-        unsigned char* buf_ptr = mp3_buf;
-        int buf_size = MP3_BUF_SIZE;
-        int read_bytes = sceIoRead(fd, buf_ptr, buf_size);
+        int read_bytes = sceIoRead(fd, mp3_buf, MP3_BUF_SIZE);
         if (read_bytes > 0) {
             sceMp3NotifyAddStreamData(mp3_handle, read_bytes);
         }
     }
-    return 1;
 }
 
 void LoadTrack(const char* filename, const char* fullpath) {
@@ -187,6 +181,7 @@ void LoadTrack(const char* filename, const char* fullpath) {
     }
 
     deckA.pitch = 0.0f;
+    deckA.pitch_bend = 0.0f;
     deckA.current_bpm = deckA.base_bpm;
     deckA.progress = 0.0f;
 
@@ -272,6 +267,7 @@ int main() {
             int shift = (pad.Buttons & PSP_CTRL_CIRCLE) ? 1 : 0;
             float step = shift ? 1.0f : 0.1f;
 
+            // PITCH FISSO: Tasti L/R
             if (pressed & PSP_CTRL_LTRIGGER) {
                 deckA.pitch -= step;
                 if (deckA.pitch < -16.0f) deckA.pitch = -16.0f;
@@ -281,12 +277,22 @@ int main() {
                 if (deckA.pitch > 16.0f) deckA.pitch = 16.0f;
             }
 
+            // PITCH FISSO: Analogico SU / GIU
             if (pad.Ly < 80) {
                 deckA.pitch += 0.05f;
                 if (deckA.pitch > 16.0f) deckA.pitch = 16.0f;
             } else if (pad.Ly > 175) {
                 deckA.pitch -= 0.05f;
                 if (deckA.pitch < -16.0f) deckA.pitch = -16.0f;
+            }
+
+            // PITCH BEND TEMPORANEO: Analogico SINISTRA / DESTRA
+            if (pad.Lx > 175) {
+                deckA.pitch_bend = 4.0f;   // Spinta temporanea +4% BPM
+            } else if (pad.Lx < 80) {
+                deckA.pitch_bend = -4.0f;  // Freno temporaneo -4% BPM
+            } else {
+                deckA.pitch_bend = 0.0f;   // Rilasciato: torna ai BPM di pitch fisso
             }
 
             if (pressed & PSP_CTRL_CROSS) {
@@ -303,17 +309,25 @@ int main() {
                 }
             }
 
-            deckA.current_bpm = deckA.base_bpm * (1.0f + (deckA.pitch / 100.0f));
+            // Calcolo finale BPM includendo il Pitch Bend
+            deckA.current_bpm = deckA.base_bpm * (1.0f + ((deckA.pitch + deckA.pitch_bend) / 100.0f));
         }
 
+        // DECODIFICA AUDIO MP3 REALE
         if (deckA.is_playing && mp3_decoder_inited && deckA.mp3_handle >= 0) {
             FillMp3Buffer(deckA.handle, deckA.mp3_handle);
-            int decoded = sceMp3Decode(deckA.mp3_handle, (short**)pcm_buf);
-            if (decoded > 0) {
-                sceAudioOutputPannedBlocking(audio_channel, PSP_AUDIO_VOLUME_MAX, PSP_AUDIO_VOLUME_MAX, pcm_buf);
+            
+            short* pcm_ptr = pcm_buf;
+            int decoded_samples = sceMp3Decode(deckA.mp3_handle, &pcm_ptr);
+            
+            if (decoded_samples > 0) {
+                sceAudioOutputPannedBlocking(audio_channel, PSP_AUDIO_VOLUME_MAX, PSP_AUDIO_VOLUME_MAX, pcm_ptr);
+                deckA.progress += 0.05f;
+                if (deckA.progress > 100.0f) deckA.progress = 0.0f;
+            } else {
+                // Se la traccia è arrivata alla fine
+                FillMp3Buffer(deckA.handle, deckA.mp3_handle);
             }
-            deckA.progress += 0.02f;
-            if (deckA.progress > 100.0f) deckA.progress = 0.0f;
         }
 
         last_buttons = pad.Buttons;
@@ -338,7 +352,7 @@ int main() {
             pspDebugScreenPrintf(" [D-PAD]: Scorri  |  [X]: Seleziona  |  [TRIANGOLO]: DECK\n");
         } else {
             pspDebugScreenPrintf("==================================================\n");
-            pspDebugScreenPrintf("           PSPBox DJ - v1.8 FIX AUDIO & CUE       \n");
+            pspDebugScreenPrintf("      PSPBox DJ - v1.9 PITCH BEND & MP3 PLAY      \n");
             pspDebugScreenPrintf("==================================================\n\n\n");
 
             pspDebugScreenPrintf("   TRACCIA :  %s\n\n", deckA.title);
@@ -346,7 +360,9 @@ int main() {
                                  deckA.current_bpm, 
                                  deckA.base_bpm, 
                                  deckA.bpm_found ? "REKORDBOX OK" : "DEFAULT 120");
-            pspDebugScreenPrintf("   PITCH   :  %+.1f%%\n\n", deckA.pitch);
+            pspDebugScreenPrintf("   PITCH   :  %+.1f%%  %s\n\n", 
+                                 deckA.pitch, 
+                                 deckA.pitch_bend > 0 ? "[BEND +]" : (deckA.pitch_bend < 0 ? "[BEND -]" : ""));
             pspDebugScreenPrintf("   AUDIO   :  [%s]\n\n\n", deckA.is_playing ? " PLAYING " : " PAUSED / CUE ");
 
             pspDebugScreenPrintf("   [");
@@ -359,8 +375,8 @@ int main() {
             pspDebugScreenPrintf("]  %.0f%%\n\n\n", deckA.progress);
 
             pspDebugScreenPrintf("--------------------------------------------------\n");
-            pspDebugScreenPrintf(" [X]: Play/Pause | [QUADRATO]: CUE | [L/R or STICK]: Pitch\n");
-            pspDebugScreenPrintf(" [CERCHIO + L/R]: Pitch x10 | [TRIANGOLO]: Browser\n");
+            pspDebugScreenPrintf(" [X]: Play | [QUADRATO]: CUE | [STICK UP/DN]: Pitch\n");
+            pspDebugScreenPrintf(" [STICK L/R]: Pitch Bend (Mano sul piatto) | [TRIANGOLO]: Browser\n");
         }
 
         sceDisplayWaitVblankStart();
