@@ -1,3 +1,6 @@
+#define MINIMP3_IMPLEMENTATION
+#include "minimp3.h"
+
 #include <pspkernel.h>
 #include <pspdebug.h>
 #include <pspctrl.h>
@@ -6,10 +9,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
-
-/* Definizione minimp3 con libreria inclusa correttamente */
-#define MINIMP3_IMPLEMENTATION
-#include "minimp3.h"
 
 /* Configurazioni Modulo per PSP-2000 + PRO-C */
 PSP_MODULE_INFO("PSPBox", 0, 1, 9);
