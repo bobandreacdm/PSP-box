@@ -1,5 +1,5 @@
 #define MINIMP3_IMPLEMENTATION
-#include "minimp3.h"
+#include "my_minimp3.h"
 
 #include <pspkernel.h>
 #include <pspdebug.h>
