@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <malloc.h>
 
 PSP_MODULE_INFO("PSPBox", 0, 1, 9);
 PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);
@@ -15,9 +16,9 @@ PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);
 #define PCM_BUF_SIZE (16 * 1024)
 #define MAX_FILES 100
 
-// Buffer audio allineati a 64-byte per il chip Media Engine della PSP
-static unsigned char mp3_buf[MP3_BUF_SIZE] __attribute__((aligned(64)));
-static short pcm_buf[PCM_BUF_SIZE / sizeof(short)] __attribute__((aligned(64)));
+// Pointers per buffer allocati dinamicamente allineati a 64 byte
+static unsigned char* mp3_buf = NULL;
+static short* pcm_buf = NULL;
 
 struct Deck {
     char title[64];
@@ -200,12 +201,10 @@ void LoadTrack(const char* filename, const char* fullpath) {
     sceIoLseek(deckA.handle, data_start, PSP_SEEK_SET);
     deckA.current_pos = data_start;
 
-    int res_init = sceMp3InitResource();
-    if (res_init < 0 && res_init != (int)0x80671001) {
-        sceMp3TermResource();
+    if (!mp3_decoder_inited) {
         sceMp3InitResource();
+        mp3_decoder_inited = 1;
     }
-    mp3_decoder_inited = 1;
 
     SceMp3InitArg mp3Init;
     memset(&mp3Init, 0, sizeof(SceMp3InitArg));
@@ -258,7 +257,6 @@ void UpdateAudio() {
     int decoded_bytes = sceMp3Decode(deckA.mp3_handle, &decoded_pcm);
 
     if (decoded_bytes > 0 && decoded_pcm != NULL) {
-        int samples = decoded_bytes / (sizeof(short) * deckA.channels);
         sceAudioOutputPannedBlocking(audio_channel, PSP_AUDIO_VOLUME_MAX, PSP_AUDIO_VOLUME_MAX, decoded_pcm);
 
         deckA.current_pos = sceIoLseek(deckA.handle, 0, PSP_SEEK_CUR);
@@ -276,7 +274,7 @@ void RenderUI() {
     pspDebugScreenSetTextColor(0x00FFFFFF);
 
     printf("==================================================\n");
-    printf("         PSPBox DJ - v1.9 (FIX RESOURCE)          \n");
+    printf("         PSPBox DJ - v1.9.1 (FIX BOOT)            \n");
     printf("==================================================\n\n");
 
     if (in_browser) {
@@ -307,7 +305,6 @@ void RenderUI() {
         }
 
         printf(" PITCH   : %+.1f%%\n\n", deckA.pitch + deckA.pitch_bend);
-
         printf(" AUDIO   : [%s]\n\n", deckA.is_playing ? "PLAYING" : "PAUSED / CUE");
 
         int bar_width = 30;
@@ -327,14 +324,27 @@ void RenderUI() {
 }
 
 int main(void) {
+    // 1. Inizializzazione Schermo immediata
     pspDebugScreenInit();
     SetupCallbacks();
+
+    // 2. Allocazione dinamica con allineamento 64 byte
+    mp3_buf = (unsigned char*)memalign(64, MP3_BUF_SIZE);
+    pcm_buf = (short*)memalign(64, PCM_BUF_SIZE);
+
+    if (!mp3_buf || !pcm_buf) {
+        printf("Errore allocazione memoria 64-byte!\n");
+        sceKernelDelayThread(3000000);
+        sceKernelExitGame();
+        return 0;
+    }
 
     memset(&deckA, 0, sizeof(Deck));
     deckA.handle = -1;
     deckA.mp3_handle = -1;
     snprintf(deckA.status_msg, 128, "Seleziona una traccia dal Browser");
 
+    // 3. Scansione file
     ScanMusicDirectory();
 
     SceCtrlData pad;
@@ -381,7 +391,6 @@ int main(void) {
                 }
             }
 
-            // Regolazione Pitch con lo Analog Stick
             if (pad.Ly < 80) {
                 deckA.pitch += 0.1f;
                 if (deckA.pitch > 16.0f) deckA.pitch = 16.0f;
@@ -390,7 +399,6 @@ int main(void) {
                 if (deckA.pitch < -16.0f) deckA.pitch = -16.0f;
             }
 
-            // Pitch Bend temporaneo (Sinistra / Destra)
             if (pad.Lx < 80) {
                 deckA.pitch_bend = -4.0f;
             } else if (pad.Lx > 170) {
@@ -408,13 +416,16 @@ int main(void) {
         UpdateAudio();
         RenderUI();
 
-        sceKernelDelayThread(10000); // Sleep per evitare di saturare la CPU
+        sceKernelDelayThread(10000);
     }
 
     StopAndCloseAudio();
     if (mp3_decoder_inited) {
         sceMp3TermResource();
     }
+
+    if (mp3_buf) free(mp3_buf);
+    if (pcm_buf) free(pcm_buf);
 
     return 0;
 }
