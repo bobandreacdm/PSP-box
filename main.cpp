@@ -211,8 +211,8 @@ void LoadTrack(const char* filename, const char* fullpath) {
             sceMp3Init(deckA.mp3_handle);
             FillMp3Buffer(deckA.handle, deckA.mp3_handle);
 
-            // Inizializzazione parametri audio reali dalla traccia
-            deckA.sample_rate = sceMp3GetSampleRate(deckA.mp3_handle);
+            // Nome funzione corretto sceMp3GetSamplingRate
+            deckA.sample_rate = sceMp3GetSamplingRate(deckA.mp3_handle);
             deckA.channels = sceMp3GetMp3ChannelNum(deckA.mp3_handle);
             if (deckA.sample_rate <= 0) deckA.sample_rate = 44100;
             if (deckA.channels <= 0) deckA.channels = 2;
