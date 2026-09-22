@@ -130,7 +130,7 @@ float ReadRekordboxBPM(const char* fullpath, char* title_out) {
 
 void StopAndCloseAudio() {
     if (deckA.mp3_handle >= 0) {
-        sceMp3ReleaseMp3Channel(deckA.mp3_handle);
+        sceMp3ReleaseMp3Handle(deckA.mp3_handle);
         deckA.mp3_handle = -1;
     }
     if (mp3_decoder_inited) {
@@ -225,7 +225,7 @@ void LoadTrack(const char* filename, const char* fullpath) {
         mp3Init.pcmBuf = (unsigned char*)pcm_buf;
         mp3Init.pcmBufSize = PCM_BUF_SIZE;
 
-        deckA.mp3_handle = sceMp3ReserveMp3Channel(&mp3Init);
+        deckA.mp3_handle = sceMp3ReserveMp3Handle(&mp3Init);
         if (deckA.mp3_handle >= 0) {
             sceMp3Init(deckA.mp3_handle);
             deckA.is_playing = 1;
@@ -306,8 +306,12 @@ int main() {
             deckA.current_bpm = deckA.base_bpm * (1.0f + (deckA.pitch / 100.0f));
         }
 
-        // Streaming audio MP3 in tempo reale
-        if (deckA.is_playing && mp3_decoder_inited) {
+        // Decodifica e output audio in tempo reale
+        if (deckA.is_playing && mp3_decoder_inited && deckA.mp3_handle >= 0) {
+            int decoded = sceMp3Decode(deckA.mp3_handle, (short**)pcm_buf);
+            if (decoded > 0) {
+                sceAudioOutputPannedBlocking(audio_channel, PSP_AUDIO_VOLUME_MAX, PSP_AUDIO_VOLUME_MAX, pcm_buf);
+            }
             deckA.progress += 0.05f;
             if (deckA.progress > 100.0f) deckA.progress = 0.0f;
         }
