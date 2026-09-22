@@ -8,8 +8,13 @@ jobs:
     container: pspdev/pspdev:latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Download minimp3.h
+        run: curl -sL https://raw.githubusercontent.com/lieff/minimp3/master/minimp3.h -o minimp3.h
+
       - name: Build Game
         run: make
+
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
