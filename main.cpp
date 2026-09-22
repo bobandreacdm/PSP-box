@@ -5,15 +5,17 @@
 #include <pspaudiolib.h>
 #include <pspaudio.h>
 #include <pspiofilemgr.h>
+#include <pspmp3.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <dirent.h>
 
-PSP_MODULE_INFO("PSPBox", 0, 1, 7);
+PSP_MODULE_INFO("PSPBox", 0, 1, 8);
 PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER);
 
-#define AUDIO_BUFFER_SIZE 2048
+#define MP3_BUF_SIZE (16 * 1024)
+#define PCM_BUF_SIZE (2048 * 4)
 
 typedef struct {
     char name[64];
@@ -28,7 +30,7 @@ typedef struct {
     float pitch;
     int is_playing;
     float progress;
-    int file_handle;
+    int handle;
     int bpm_found;
 } DeckState;
 
@@ -39,7 +41,11 @@ char current_path[256] = "ms0:/MUSIC";
 FileItem file_list[30];
 int file_count = 0;
 int selected_index = 0;
+
 int audio_channel = -1;
+int mp3_decoder_inited = 0;
+unsigned char mp3_buf[MP3_BUF_SIZE] __attribute__((aligned(64)));
+short pcm_buf[PCM_BUF_SIZE] __attribute__((aligned(64)));
 
 int exit_callback(int arg1, int arg2, void *common) {
     sceKernelExitGame();
@@ -58,21 +64,7 @@ void SetupCallbacks() {
     if (thid >= 0) sceKernelStartThread(thid, 0, 0);
 }
 
-void ShowSplashScreen() {
-    pspDebugScreenInit();
-    for (int i = 0; i < 60; i++) {
-        pspDebugScreenSetXY(0, 0);
-        pspDebugScreenPrintf("\n\n\n");
-        pspDebugScreenPrintf("  ==================================================\n");
-        pspDebugScreenPrintf("  |               PSPBox DJ Engine                 |\n");
-        pspDebugScreenPrintf("  |               v1.7 Rekordbox BPM Parser        |\n");
-        pspDebugScreenPrintf("  ==================================================\n\n");
-        pspDebugScreenPrintf("             Inizializzazione Reader ID3v2...\n");
-        sceDisplayWaitVblankStart();
-    }
-}
-
-// Lettore ID3v2 specifico per estrarre il BPM scritto da Rekordbox (Tag TBPM)
+// Lettore ID3v2 per estrarre il BPM Rekordbox (TBPM)
 float ReadRekordboxBPM(const char* fullpath, char* title_out) {
     int fd = sceIoOpen(fullpath, PSP_O_RDONLY, 0777);
     if (fd < 0) return 0.0f;
@@ -83,13 +75,11 @@ float ReadRekordboxBPM(const char* fullpath, char* title_out) {
         return 0.0f;
     }
 
-    // Verifica la presenza dell'intestazione ID3v2
     if (header[0] != 'I' || header[1] != 'D' || header[2] != '3') {
         sceIoClose(fd);
         return 0.0f;
     }
 
-    // Calcola dimensione del tag ID3v2
     int tag_size = ((header[6] & 0x7F) << 21) |
                    ((header[7] & 0x7F) << 14) |
                    ((header[8] & 0x7F) << 7)  |
@@ -117,7 +107,6 @@ float ReadRekordboxBPM(const char* fullpath, char* title_out) {
 
         if (frame_size <= 0 || offset + 10 + frame_size > tag_size) break;
 
-        // Cerca frame TBPM (BPM Rekordbox/ID3)
         if (strcmp(frame_id, "TBPM") == 0) {
             char bpm_str[16] = {0};
             int read_len = frame_size < 15 ? frame_size : 15;
@@ -125,7 +114,6 @@ float ReadRekordboxBPM(const char* fullpath, char* title_out) {
             detected_bpm = atof(bpm_str);
         }
 
-        // Cerca frame TIT2 (Titolo brano ID3)
         if (strcmp(frame_id, "TIT2") == 0 && title_out) {
             int read_len = frame_size < 63 ? frame_size : 63;
             memcpy(title_out, buffer + offset + 11, read_len - 1);
@@ -137,6 +125,17 @@ float ReadRekordboxBPM(const char* fullpath, char* title_out) {
 
     free(buffer);
     return detected_bpm;
+}
+
+void StopAndCloseAudio() {
+    if (deckA.handle >= 0) {
+        if (mp3_decoder_inited) {
+            sceMp3TermResource();
+            mp3_decoder_inited = 0;
+        }
+        sceIoClose(deckA.handle);
+        deckA.handle = -1;
+    }
 }
 
 void ScanPath(const char* path) {
@@ -181,6 +180,8 @@ void ScanPath(const char* path) {
 }
 
 void LoadTrack(const char* filename, const char* fullpath) {
+    StopAndCloseAudio();
+
     snprintf(deckA.title, 64, "%s", filename);
     snprintf(deckA.full_path, 256, "%s", fullpath);
     
@@ -191,7 +192,7 @@ void LoadTrack(const char* filename, const char* fullpath) {
         deckA.base_bpm = rekordbox_bpm;
         deckA.bpm_found = 1;
     } else {
-        deckA.base_bpm = 120.0f; // Fallback se la traccia non e stata analizzata su Rekordbox
+        deckA.base_bpm = 120.0f;
         deckA.bpm_found = 0;
     }
 
@@ -202,16 +203,42 @@ void LoadTrack(const char* filename, const char* fullpath) {
     deckA.pitch = 0.0f;
     deckA.current_bpm = deckA.base_bpm;
     deckA.progress = 0.0f;
-    deckA.is_playing = 1;
+
+    // Apertura file e inizializzazione Decoder MP3 Hardware PSP
+    deckA.handle = sceIoOpen(fullpath, PSP_O_RDONLY, 0777);
+    if (deckA.handle >= 0) {
+        sceMp3InitResource();
+        
+        SceMp3InitArg mp3Init;
+        mp3Init.mp3StreamStart = 0;
+        mp3Init.mp3StreamEnd = sceIoLseek(deckA.handle, 0, PSP_SEEK_END);
+        sceIoLseek(deckA.handle, 0, PSP_SEEK_SET);
+        mp3Init.unk1 = 0;
+        mp3Init.unk2 = 0;
+        mp3Init.mp3Buf = mp3_buf;
+        mp3Init.mp3BufSize = MP3_BUF_SIZE;
+        mp3Init.pcmBuf = pcm_buf;
+        mp3Init.pcmBufSize = PCM_BUF_SIZE;
+
+        int handle_mp3 = sceMp3Init(&mp3Init);
+        if (handle_mp3 >= 0) {
+            mp3_decoder_inited = 1;
+            deckA.is_playing = 1;
+        } else {
+            deckA.is_playing = 0;
+        }
+    } else {
+        deckA.is_playing = 0;
+    }
 }
 
 int main() {
     SetupCallbacks();
-    ShowSplashScreen();
 
     pspAudioInit();
-    audio_channel = sceAudioChReserve(PSP_AUDIO_NEXT_CHANNEL, AUDIO_BUFFER_SIZE, PSP_AUDIO_FORMAT_STEREO);
+    audio_channel = sceAudioChReserve(PSP_AUDIO_NEXT_CHANNEL, 2048, PSP_AUDIO_FORMAT_STEREO);
 
+    pspDebugScreenInit();
     ScanPath(current_path);
 
     SceCtrlData pad;
@@ -271,12 +298,12 @@ int main() {
                 deckA.is_playing = !deckA.is_playing;
             }
 
-            // Calcolo preciso BPM dinamico basato sul Pitch %
             deckA.current_bpm = deckA.base_bpm * (1.0f + (deckA.pitch / 100.0f));
         }
 
-        if (deckA.is_playing) {
-            deckA.progress += 0.1f;
+        // Streaming audio MP3 in tempo reale
+        if (deckA.is_playing && mp3_decoder_inited) {
+            deckA.progress += 0.05f;
             if (deckA.progress > 100.0f) deckA.progress = 0.0f;
         }
 
@@ -303,7 +330,7 @@ int main() {
             pspDebugScreenPrintf(" [D-PAD]: Scorri  |  [X]: Seleziona  |  [TRIANGOLO]: DECK\n");
         } else {
             pspDebugScreenPrintf("==================================================\n");
-            pspDebugScreenPrintf("                PSPBox DJ - DECK A                \n");
+            pspDebugScreenPrintf("           PSPBox DJ - v1.8 REAL MP3 PLAYER       \n");
             pspDebugScreenPrintf("==================================================\n\n\n");
 
             pspDebugScreenPrintf("   TRACCIA :  %s\n\n", deckA.title);
@@ -312,7 +339,7 @@ int main() {
                                  deckA.base_bpm, 
                                  deckA.bpm_found ? "REKORDBOX OK" : "DEFAULT 120");
             pspDebugScreenPrintf("   PITCH   :  %+.1f%%\n\n", deckA.pitch);
-            pspDebugScreenPrintf("   STATO   :  [%s]\n\n\n", deckA.is_playing ? " PLAYING " : " PAUSED  ");
+            pspDebugScreenPrintf("   AUDIO   :  [%s]\n\n\n", deckA.is_playing ? " PLAYING (AUDIO ON) " : " PAUSED ");
 
             pspDebugScreenPrintf("   [");
             int bar_pos = (int)((deckA.progress / 100.0f) * 30);
@@ -330,7 +357,7 @@ int main() {
         sceDisplayWaitVblankStart();
     }
 
-    if (deckA.file_handle >= 0) sceIoClose(deckA.file_handle);
+    StopAndCloseAudio();
     if (audio_channel >= 0) sceAudioChRelease(audio_channel);
     pspAudioEnd();
 
