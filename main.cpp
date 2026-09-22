@@ -9,10 +9,9 @@
 #define MINIMP3_IMPLEMENTATION
 #include "minimp3.h"
 
-/* Definizione modulo PSP */
+/* Impostazione modulo compatibile con tutti i CFW */
 PSP_MODULE_INFO("PSPBox", 0, 1, 9);
-PSP_MAIN_THREAD_ATTR(PSP_THREAD_ATTR_USER | PSP_THREAD_ATTR_VFPU);
-PSP_MAIN_THREAD_STACK_SIZE_KB(2048); // Forza uno stack di memoria adeguato
+PSP_MAIN_THREAD_ATTR(0);
 
 #define MAX_FILES 100
 #define AUDIO_BUF_SAMPLES 1152
@@ -49,10 +48,9 @@ static int audio_channel = -1;
 static mp3dec_t mp3d;
 static mp3dec_frame_info_t info;
 
-static unsigned char input_buf[4096] __attribute__((aligned(64)));
+static unsigned char input_buf[2048] __attribute__((aligned(64)));
 static short pcm_output[MINIMP3_MAX_SAMPLES_PER_FRAME] __attribute__((aligned(64)));
 
-/* Callbacks per l'uscita pulita dal gioco */
 int exit_callback(int arg1, int arg2, void *common) {
     sceKernelExitGame();
     return 0;
@@ -173,7 +171,7 @@ void RenderUI() {
     pspDebugScreenSetTextColor(0x00FFFFFF);
 
     printf("==================================================\n");
-    printf("         PSPBox DJ - v1.9.3 (SAFE BOOT)           \n");
+    printf("         PSPBox DJ - v1.9.3 (PRX FIXED)           \n");
     printf("==================================================\n\n");
 
     if (in_browser) {
@@ -218,10 +216,7 @@ void RenderUI() {
 }
 
 int main(void) {
-    /* 1. Inizializzazione Video Primario */
     pspDebugScreenInit();
-    
-    /* 2. Setup dei Callback di sistema */
     SetupCallbacks();
 
     memset(&deckA, 0, sizeof(Deck));
@@ -291,10 +286,7 @@ int main(void) {
 
         last_buttons = pad.Buttons;
 
-        /* Gestione audio sincrona e leggera */
         ProcessAudio();
-
-        /* Rendering Schermo */
         RenderUI();
 
         sceKernelDelayThread(10000);
