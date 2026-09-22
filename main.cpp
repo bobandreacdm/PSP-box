@@ -31,10 +31,11 @@ typedef struct {
     int is_playing;
     float progress;
     int handle;
+    int mp3_handle;
     int bpm_found;
 } DeckState;
 
-DeckState deckA = {"Nessuna Traccia", "", 120.0f, 120.0f, 0.0f, 0, 0.0f, -1, 0};
+DeckState deckA = {"Nessuna Traccia", "", 120.0f, 120.0f, 0.0f, 0, 0.0f, -1, -1, 0};
 
 int browser_open = 0;
 char current_path[256] = "ms0:/MUSIC";
@@ -128,11 +129,15 @@ float ReadRekordboxBPM(const char* fullpath, char* title_out) {
 }
 
 void StopAndCloseAudio() {
+    if (deckA.mp3_handle >= 0) {
+        sceMp3ReleaseMp3Channel(deckA.mp3_handle);
+        deckA.mp3_handle = -1;
+    }
+    if (mp3_decoder_inited) {
+        sceMp3TermResource();
+        mp3_decoder_inited = 0;
+    }
     if (deckA.handle >= 0) {
-        if (mp3_decoder_inited) {
-            sceMp3TermResource();
-            mp3_decoder_inited = 0;
-        }
         sceIoClose(deckA.handle);
         deckA.handle = -1;
     }
@@ -208,21 +213,21 @@ void LoadTrack(const char* filename, const char* fullpath) {
     deckA.handle = sceIoOpen(fullpath, PSP_O_RDONLY, 0777);
     if (deckA.handle >= 0) {
         sceMp3InitResource();
-        
+        mp3_decoder_inited = 1;
+
         SceMp3InitArg mp3Init;
+        memset(&mp3Init, 0, sizeof(SceMp3InitArg));
         mp3Init.mp3StreamStart = 0;
         mp3Init.mp3StreamEnd = sceIoLseek(deckA.handle, 0, PSP_SEEK_END);
         sceIoLseek(deckA.handle, 0, PSP_SEEK_SET);
-        mp3Init.unk1 = 0;
-        mp3Init.unk2 = 0;
         mp3Init.mp3Buf = mp3_buf;
         mp3Init.mp3BufSize = MP3_BUF_SIZE;
-        mp3Init.pcmBuf = pcm_buf;
+        mp3Init.pcmBuf = (unsigned char*)pcm_buf;
         mp3Init.pcmBufSize = PCM_BUF_SIZE;
 
-        int handle_mp3 = sceMp3Init(&mp3Init);
-        if (handle_mp3 >= 0) {
-            mp3_decoder_inited = 1;
+        deckA.mp3_handle = sceMp3ReserveMp3Channel(&mp3Init);
+        if (deckA.mp3_handle >= 0) {
+            sceMp3Init(deckA.mp3_handle);
             deckA.is_playing = 1;
         } else {
             deckA.is_playing = 0;
